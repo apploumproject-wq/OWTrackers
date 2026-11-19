@@ -6,6 +6,8 @@ import {defineConfig} from 'vite';
 
 export default defineConfig(() => {
   return {
+    // GitHub Pages serves this project from /OWTrackers/, not from the domain root.
+    base: '/OWTrackers/',
     plugins: [
       react(),
       tailwindcss(),
