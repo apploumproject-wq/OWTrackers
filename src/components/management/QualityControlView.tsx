@@ -259,6 +259,7 @@ export function QualityControlView({
           {employees.map((emp) => (
             <option key={emp.id} value={emp.id}>
               {emp.fullName}
+              {emp.accountStatus !== 'actif' ? ' (Désactivé)' : ''}
             </option>
           ))}
         </select>

@@ -70,7 +70,7 @@ export interface AppUser {
   supervisorName?: string;
   managerName?: string;
   plannedSchedule: string;
-  dailyTargetDossiers: number;
+  dailyTargetDossiers?: number;
   hireDate: string;
 }
 
@@ -92,7 +92,7 @@ export interface ManagedEmployee {
   plannedStart: string;
   plannedEnd: string;
   restDays: string[];
-  dailyTargetDossiers: number;
+  dailyTargetDossiers?: number;
   status: ServiceStatus;
   dossiersToday: number;
   presenceSecondsToday: number;

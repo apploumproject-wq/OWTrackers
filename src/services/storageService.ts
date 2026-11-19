@@ -330,7 +330,7 @@ export const storageService = {
       plannedStart: '08:30',
       plannedEnd: '18:00',
       restDays: ['Samedi', 'Dimanche'],
-      dailyTargetDossiers: 0,
+      dailyTargetDossiers: undefined,
       status: 'absent',
       dossiersToday: 0,
       presenceSecondsToday: 0,
@@ -790,6 +790,23 @@ export const storageService = {
       };
     }
 
+    let finalDailyTarget: number | undefined;
+    if (input.role === 'employee') {
+      if (input.dailyTargetDossiers !== undefined && input.dailyTargetDossiers !== null) {
+        if (
+          typeof input.dailyTargetDossiers !== 'number' ||
+          !Number.isInteger(input.dailyTargetDossiers) ||
+          input.dailyTargetDossiers < 1
+        ) {
+          return {
+            users: accounts,
+            error: 'L’objectif journalier doit être un nombre entier positif (1 minimum).',
+          };
+        }
+        finalDailyTarget = input.dailyTargetDossiers;
+      }
+    }
+
     const provisionalPassword =
       !hasCustomPassword && finalMatricule
         ? buildProvisionalPassword(finalMatricule)
@@ -816,8 +833,7 @@ export const storageService = {
       plannedStart: input.plannedStart ?? '08:30',
       plannedEnd: input.plannedEnd ?? '17:00',
       restDays: input.restDays?.length ? input.restDays : ['Samedi', 'Dimanche'],
-      dailyTargetDossiers:
-        input.role === 'employee' ? Math.max(1, input.dailyTargetDossiers ?? 35) : 0,
+      dailyTargetDossiers: finalDailyTarget,
       status: 'absent',
       dossiersToday: 0,
       presenceSecondsToday: 0,
@@ -942,7 +958,7 @@ export const storageService = {
         plannedStart: '08:30',
         plannedEnd: '17:00',
         restDays: ['Samedi', 'Dimanche'],
-        dailyTargetDossiers: 35,
+        dailyTargetDossiers: undefined,
         status: 'absent',
         dossiersToday: 0,
         presenceSecondsToday: 0,
@@ -1061,14 +1077,40 @@ export const storageService = {
     }
 
     if (
-      existing.isPrimaryAdmin &&
-      patch.accountStatus &&
-      patch.accountStatus !== 'actif'
+      patch.accountStatus !== undefined &&
+      patch.accountStatus !== existing.accountStatus
     ) {
-      return {
-        users: list,
-        error: 'Le compte de l’administrateur principal ne peut pas être désactivé ou archivé.',
-      };
+      if (actor.role !== 'admin') {
+        return {
+          users: list,
+          error: 'Seul un administrateur peut désactiver ou réactiver un compte utilisateur.',
+        };
+      }
+      if (patch.accountStatus !== 'actif') {
+        if (existing.id === actor.id) {
+          return {
+            users: list,
+            error: 'Vous ne pouvez pas désactiver votre propre compte administrateur.',
+          };
+        }
+        if (existing.isPrimaryAdmin) {
+          return {
+            users: list,
+            error: 'Le compte de l’administrateur principal ne peut pas être désactivé.',
+          };
+        }
+        if (existing.role === 'admin') {
+          const remainingActiveAdmins = list.filter(
+            (u) => u.id !== existing.id && u.role === 'admin' && u.accountStatus === 'actif'
+          );
+          if (remainingActiveAdmins.length === 0) {
+            return {
+              users: list,
+              error: 'Impossible de désactiver le dernier administrateur actif.',
+            };
+          }
+        }
+      }
     }
 
     const nextEmail =
@@ -1108,14 +1150,42 @@ export const storageService = {
         .filter(Boolean)
     );
 
-    // Conserver les identifiants déjà attribués; n'autoriser la saisie que s'ils manquent lors d'un changement de rôle
+    const requestedUsername =
+      patch.username !== undefined ? patch.username.trim() : undefined;
+    const requestedMatricule =
+      patch.matricule !== undefined ? patch.matricule.trim() : undefined;
+
+    if (
+      requestedUsername !== undefined &&
+      requestedUsername !== (existing.username ?? '') &&
+      actor.role !== 'admin'
+    ) {
+      return {
+        users: list,
+        error: 'Seul un administrateur peut modifier l’identifiant de connexion.',
+      };
+    }
+
+    if (
+      requestedMatricule !== undefined &&
+      requestedMatricule !== (existing.matricule ?? '') &&
+      actor.role !== 'admin'
+    ) {
+      return {
+        users: list,
+        error: 'Seul un administrateur peut modifier le matricule après la création du compte.',
+      };
+    }
+
     let finalUsername = existing.username;
-    if (nextRole === 'admin' && !finalUsername && patch.username?.trim()) {
-      const candidate = patch.username.trim();
+    if (nextRole === 'admin') {
+      const candidate =
+        requestedUsername !== undefined ? requestedUsername : (existing.username ?? '').trim();
       if (candidate.length < 2 || /\s/.test(candidate)) {
         return {
           users: list,
-          error: 'L’identifiant administrateur doit contenir au moins 2 caractères sans espace.',
+          error:
+            'L’identifiant administrateur est obligatoire (2 caractères minimum, sans espace).',
         };
       }
       if (otherIdentifiers.has(candidate.toLowerCase())) {
@@ -1125,18 +1195,60 @@ export const storageService = {
     }
 
     let finalMatricule = existing.matricule;
-    if (nextRole !== 'admin' && !finalMatricule) {
-      const candidate = patch.matricule?.trim() ?? '';
+    if (nextRole !== 'admin') {
+      const candidate =
+        requestedMatricule !== undefined ? requestedMatricule : (existing.matricule ?? '').trim();
       if (candidate.length < 2 || /\s/.test(candidate)) {
         return {
           users: list,
-          error: 'Un matricule valide est obligatoire pour ce rôle.',
+          error: 'Le matricule est obligatoire (2 caractères minimum, sans espace).',
         };
       }
-      if (otherIdentifiers.has(candidate.toLowerCase())) {
+      if (
+        (finalUsername && candidate.toLowerCase() === finalUsername.toLowerCase()) ||
+        otherIdentifiers.has(candidate.toLowerCase())
+      ) {
         return { users: list, error: `Le matricule "${candidate}" est déjà utilisé.` };
       }
       finalMatricule = candidate;
+    } else if (requestedMatricule !== undefined) {
+      if (requestedMatricule === '') {
+        finalMatricule = undefined;
+      } else {
+        if (requestedMatricule.length < 2 || /\s/.test(requestedMatricule)) {
+          return {
+            users: list,
+            error: 'Le matricule saisi doit contenir au moins 2 caractères sans espace.',
+          };
+        }
+        if (
+          (finalUsername && requestedMatricule.toLowerCase() === finalUsername.toLowerCase()) ||
+          otherIdentifiers.has(requestedMatricule.toLowerCase())
+        ) {
+          return { users: list, error: `Le matricule "${requestedMatricule}" est déjà utilisé.` };
+        }
+        finalMatricule = requestedMatricule;
+      }
+    }
+
+    let nextDailyTarget: number | undefined = existing.dailyTargetDossiers;
+    if (nextRole !== 'employee') {
+      nextDailyTarget = undefined;
+    } else if ('dailyTargetDossiers' in patch) {
+      if (patch.dailyTargetDossiers === undefined || patch.dailyTargetDossiers === null) {
+        nextDailyTarget = undefined;
+      } else if (
+        typeof patch.dailyTargetDossiers !== 'number' ||
+        !Number.isInteger(patch.dailyTargetDossiers) ||
+        patch.dailyTargetDossiers < 1
+      ) {
+        return {
+          users: list,
+          error: 'L’objectif journalier doit être un nombre entier positif (1 minimum).',
+        };
+      } else {
+        nextDailyTarget = patch.dailyTargetDossiers;
+      }
     }
 
     const updated: ManagedEmployee = {
@@ -1148,6 +1260,7 @@ export const storageService = {
       id: existing.id,
       username: finalUsername,
       matricule: finalMatricule,
+      dailyTargetDossiers: nextDailyTarget,
       isPrimaryAdmin: existing.isPrimaryAdmin,
     };
 
@@ -1163,6 +1276,7 @@ export const storageService = {
           ? {
               ...s,
               employeeName: updated.fullName,
+              matricule: updated.matricule ?? s.matricule,
               teamId: updated.teamId,
               teamName,
               plannedStart: updated.plannedStart,
@@ -1172,6 +1286,39 @@ export const storageService = {
           : s
       );
       safeWriteJson(STORAGE_KEYS.SCHEDULES, nextSchedules);
+    }
+
+    if ((existing.matricule ?? '') !== (updated.matricule ?? '')) {
+      this.appendAuditLog(
+        actor,
+        `Matricule modifié · ${updated.fullName}`,
+        existing.matricule ?? '—',
+        updated.matricule ?? '—',
+        options?.reason
+      );
+    }
+
+    if ((existing.username ?? '') !== (updated.username ?? '')) {
+      this.appendAuditLog(
+        actor,
+        `Identifiant modifié · ${updated.fullName}`,
+        existing.username ?? '—',
+        updated.username ?? '—',
+        options?.reason
+      );
+    }
+
+    if (existing.accountStatus !== updated.accountStatus) {
+      const idLabel = updated.matricule || updated.username || '—';
+      const statusLabel = (s: AccountStatus) =>
+        s === 'actif' ? 'Actif' : s === 'desactive' ? 'Désactivé' : 'Archivé';
+      this.appendAuditLog(
+        actor,
+        `${updated.accountStatus === 'actif' ? 'Réactivation compte' : 'Désactivation compte'} · ${updated.fullName} (${idLabel})`,
+        statusLabel(existing.accountStatus),
+        statusLabel(updated.accountStatus),
+        options?.reason
+      );
     }
 
     this.appendAuditLog(
@@ -1197,10 +1344,17 @@ export const storageService = {
     const target = list.find((e) => e.id === employeeId);
     if (!target) return { users: list, error: 'Compte introuvable.' };
 
-    if (target.role === 'admin' && actor.role !== 'admin') {
+    if (actor.role !== 'admin') {
       return {
         users: list,
-        error: 'Seul un administrateur peut modifier le statut d’un compte administrateur.',
+        error: 'Seul un administrateur peut désactiver ou réactiver un compte utilisateur.',
+      };
+    }
+
+    if (status !== 'actif' && target.id === actor.id) {
+      return {
+        users: list,
+        error: 'Vous ne pouvez pas désactiver votre propre compte administrateur.',
       };
     }
 
@@ -1218,18 +1372,27 @@ export const storageService = {
       if (remainingActiveAdmins.length === 0) {
         return {
           users: list,
-          error: 'Impossible de désactiver ou archiver le dernier administrateur actif.',
+          error: 'Impossible de désactiver le dernier administrateur actif.',
         };
       }
     }
 
     const next = list.map((e) => (e.id === employeeId ? { ...e, accountStatus: status } : e));
     safeWriteJson(STORAGE_KEYS.ACCOUNTS, next);
+
+    const statusLabel = (s: AccountStatus) =>
+      s === 'actif' ? 'Actif' : s === 'desactive' ? 'Désactivé' : 'Archivé';
+    const targetIdLabel = target.matricule || target.username || '—';
+    const actionLabel =
+      status === 'actif'
+        ? `Réactivation compte · ${target.fullName} (${targetIdLabel})`
+        : `Désactivation compte · ${target.fullName} (${targetIdLabel})`;
+
     this.appendAuditLog(
       actor,
-      `Statut compte · ${target.fullName}`,
-      target.accountStatus,
-      status,
+      actionLabel,
+      statusLabel(target.accountStatus),
+      statusLabel(status),
       reason
     );
     return { users: next };

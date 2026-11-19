@@ -1,7 +1,6 @@
 import React, { useMemo, useRef, useState } from 'react';
 import {
   AlertTriangle,
-  Archive,
   Check,
   CheckCircle2,
   Copy,
@@ -119,7 +118,7 @@ interface AccountFormState {
   plannedStart: string;
   plannedEnd: string;
   restDays: string[];
-  dailyTargetDossiers: number;
+  dailyTargetDossiers: string;
   accountStatus: AccountStatus;
   password: string;
   confirmPassword: string;
@@ -141,7 +140,7 @@ export function EmployeesTeamsView({
   onReviewCorrectionRequest,
 }: EmployeesTeamsViewProps) {
   const [search, setSearch] = useState('');
-  const [statusFilter, setStatusFilter] = useState<'all' | AccountStatus>('all');
+  const [statusFilter, setStatusFilter] = useState<'all' | 'actif' | 'desactive'>('all');
   const [roleFilter, setRoleFilter] = useState<'all' | UserRole>('all');
   const [accountForm, setAccountForm] = useState<AccountFormState | null>(null);
   const [formError, setFormError] = useState<string | null>(null);
@@ -155,6 +154,7 @@ export function EmployeesTeamsView({
   const [submitting, setSubmitting] = useState(false);
   const [showPassword, setShowPassword] = useState(false);
   const [inspectedEmp, setInspectedEmp] = useState<ManagedEmployee | null>(null);
+  const [pendingDeactivation, setPendingDeactivation] = useState<ManagedEmployee | null>(null);
   const [editingTeam, setEditingTeam] = useState<(Omit<TeamRecord, 'id'> & { id?: string }) | null>(
     null
   );
@@ -200,7 +200,8 @@ export function EmployeesTeamsView({
       : employees;
 
     return base.filter((e) => {
-      if (statusFilter !== 'all' && e.accountStatus !== statusFilter) return false;
+      if (statusFilter === 'actif' && e.accountStatus !== 'actif') return false;
+      if (statusFilter === 'desactive' && e.accountStatus === 'actif') return false;
       if (roleFilter !== 'all' && e.role !== roleFilter) return false;
       const q = search.trim().toLowerCase();
       if (!q) return true;
@@ -249,7 +250,7 @@ export function EmployeesTeamsView({
       plannedStart: '08:30',
       plannedEnd: '17:00',
       restDays: ['Samedi', 'Dimanche'],
-      dailyTargetDossiers: 35,
+      dailyTargetDossiers: '',
       accountStatus: 'actif',
       password: '',
       confirmPassword: '',
@@ -276,7 +277,10 @@ export function EmployeesTeamsView({
       plannedStart: emp.plannedStart,
       plannedEnd: emp.plannedEnd,
       restDays: emp.restDays,
-      dailyTargetDossiers: emp.dailyTargetDossiers,
+      dailyTargetDossiers:
+        typeof emp.dailyTargetDossiers === 'number' && emp.dailyTargetDossiers > 0
+          ? String(emp.dailyTargetDossiers)
+          : '',
       accountStatus: emp.accountStatus,
       password: '',
       confirmPassword: '',
@@ -297,7 +301,7 @@ export function EmployeesTeamsView({
     const cleanUsername = accountForm.username.trim();
     const cleanMatricule = accountForm.matricule.trim();
 
-    if (!accountForm.id) {
+    if (!accountForm.id || isAdmin) {
       if (isAdminAccount) {
         if (cleanUsername.length < 2 || /\s/.test(cleanUsername)) {
           setFormError(
@@ -308,6 +312,19 @@ export function EmployeesTeamsView({
       } else if (cleanMatricule.length < 2 || /\s/.test(cleanMatricule)) {
         setFormError('Le matricule est obligatoire (2 caractères minimum, sans espace).');
         return;
+      }
+    }
+
+    let parsedDailyTarget: number | undefined;
+    if (accountForm.role === 'employee') {
+      const rawTarget = accountForm.dailyTargetDossiers.trim();
+      if (rawTarget !== '') {
+        const numericTarget = Number(rawTarget);
+        if (!/^\d+$/.test(rawTarget) || !Number.isInteger(numericTarget) || numericTarget < 1) {
+          setFormError('L’objectif / jour doit être un nombre entier positif (1 minimum).');
+          return;
+        }
+        parsedDailyTarget = numericTarget;
       }
     }
 
@@ -349,7 +366,7 @@ export function EmployeesTeamsView({
           plannedStart: accountForm.plannedStart,
           plannedEnd: accountForm.plannedEnd,
           restDays: accountForm.restDays,
-          dailyTargetDossiers: accountForm.dailyTargetDossiers,
+          dailyTargetDossiers: parsedDailyTarget,
         });
         if (res.error) {
           setFormError(res.error);
@@ -389,11 +406,15 @@ export function EmployeesTeamsView({
         accountForm.id,
         {
           username:
-            isAdminAccount && !accountForm.hasExistingUsername && cleanUsername
+            isAdmin && isAdminAccount
+              ? cleanUsername
+              : isAdminAccount && !accountForm.hasExistingUsername && cleanUsername
               ? cleanUsername
               : undefined,
           matricule:
-            !isAdminAccount && !accountForm.hasExistingMatricule && cleanMatricule
+            isAdmin && !isAdminAccount
+              ? cleanMatricule
+              : !isAdminAccount && !accountForm.hasExistingMatricule && cleanMatricule
               ? cleanMatricule
               : undefined,
           fullName: accountForm.fullName,
@@ -409,9 +430,8 @@ export function EmployeesTeamsView({
           plannedStart: accountForm.plannedStart,
           plannedEnd: accountForm.plannedEnd,
           restDays: accountForm.restDays,
-          dailyTargetDossiers:
-            accountForm.role === 'employee' ? accountForm.dailyTargetDossiers : 0,
-          accountStatus: accountForm.accountStatus,
+          dailyTargetDossiers: accountForm.role === 'employee' ? parsedDailyTarget : undefined,
+          accountStatus: isAdmin ? accountForm.accountStatus : undefined,
         },
         {
           newPassword: accountForm.password.trim() ? accountForm.password : undefined,
@@ -569,7 +589,7 @@ export function EmployeesTeamsView({
 
   if (mode === 'teams') {
     const assignableEmployees = employees.filter(
-      (e) => e.accountStatus !== 'archive' && e.role === 'employee'
+      (e) => e.accountStatus === 'actif' && e.role === 'employee'
     );
 
     return (
@@ -596,7 +616,7 @@ export function EmployeesTeamsView({
           <div className="grid grid-cols-1 md:grid-cols-3 gap-4">
             {teams.map((team) => {
               const members = employees.filter(
-                (e) => e.teamId === team.id && e.accountStatus !== 'archive'
+                (e) => e.teamId === team.id && e.accountStatus === 'actif'
               );
               const presentMembers = members.filter((m) => m.status !== 'absent').length;
               const company = companies.find((c) => c.id === team.defaultCompanyId);
@@ -1057,7 +1077,6 @@ export function EmployeesTeamsView({
                 { id: 'all', label: 'Tous' },
                 { id: 'actif', label: 'Actifs' },
                 { id: 'desactive', label: 'Désactivés' },
-                { id: 'archive', label: 'Archivés' },
               ] as const
             ).map((f) => (
               <button
@@ -1106,7 +1125,7 @@ export function EmployeesTeamsView({
                   const team = teams.find((t) => t.id === emp.teamId);
                   const sup = employees.find((s) => s.id === emp.supervisorId);
                   const canEditTarget = isAdmin || (emp.role !== 'admin' && emp.role !== 'manager');
-                  const canChangeStatusTarget = !isSupervisor && canEditTarget && !emp.isPrimaryAdmin;
+                  const canChangeStatusTarget = isAdmin && !emp.isPrimaryAdmin && emp.id !== user.id;
 
                   return (
                     <tr key={emp.id} className="hover:bg-[#F7EEFC]/40 dark:hover:bg-[#211E27]/70">
@@ -1148,17 +1167,17 @@ export function EmployeesTeamsView({
                           className={`font-semibold ${
                             emp.accountStatus === 'actif'
                               ? 'text-emerald-700 dark:text-emerald-400'
-                              : emp.accountStatus === 'desactive'
-                              ? 'text-amber-700 dark:text-amber-400'
-                              : 'text-slate-500 dark:text-[#C8C2D0]/60'
+                              : 'text-amber-700 dark:text-amber-400'
                           }`}
                         >
-                          {ACCOUNT_STATUS_LABELS[emp.accountStatus]}
+                          {emp.accountStatus === 'actif' ? 'Actif' : ACCOUNT_STATUS_LABELS[emp.accountStatus]}
                         </span>
                       </td>
                       <td className="py-3 px-4 text-right font-mono tabular-nums text-xs font-semibold text-slate-900 dark:text-white">
                         {emp.role === 'employee'
-                          ? `${emp.dossiersToday} / ${emp.dailyTargetDossiers}`
+                          ? typeof emp.dailyTargetDossiers === 'number' && emp.dailyTargetDossiers > 0
+                            ? `${emp.dossiersToday} / ${emp.dailyTargetDossiers}`
+                            : `${emp.dossiersToday}`
                           : '—'}
                       </td>
                       <td className="py-3 px-5 text-right whitespace-nowrap">
@@ -1184,8 +1203,14 @@ export function EmployeesTeamsView({
                           {canChangeStatusTarget && emp.accountStatus !== 'actif' && (
                             <button
                               type="button"
-                              onClick={() => handleStatusChange(emp, 'actif', 'Réactivation compte')}
-                              title="Activer"
+                              onClick={() =>
+                                handleStatusChange(
+                                  emp,
+                                  'actif',
+                                  'Réactivation du compte par administrateur'
+                                )
+                              }
+                              title="Réactiver le compte"
                               className="p-1.5 rounded-lg text-emerald-700 dark:text-emerald-400 hover:bg-emerald-50 dark:hover:bg-emerald-950/50 cursor-pointer"
                             >
                               <UserCheck className="w-4 h-4" />
@@ -1194,29 +1219,11 @@ export function EmployeesTeamsView({
                           {canChangeStatusTarget && emp.accountStatus === 'actif' && (
                             <button
                               type="button"
-                              onClick={() =>
-                                handleStatusChange(emp, 'desactive', 'Désactivation temporaire')
-                              }
-                              title="Désactiver"
+                              onClick={() => setPendingDeactivation(emp)}
+                              title="Désactiver le compte"
                               className="p-1.5 rounded-lg text-amber-700 dark:text-amber-400 hover:bg-amber-50 dark:hover:bg-amber-950/40 cursor-pointer"
                             >
                               <UserMinus className="w-4 h-4" />
-                            </button>
-                          )}
-                          {canChangeStatusTarget && emp.accountStatus !== 'archive' && (
-                            <button
-                              type="button"
-                              onClick={() =>
-                                handleStatusChange(
-                                  emp,
-                                  'archive',
-                                  'Archivage avec historique conservé'
-                                )
-                              }
-                              title="Archiver"
-                              className="p-1.5 rounded-lg text-slate-500 dark:text-[#C8C2D0] hover:bg-slate-100 dark:hover:bg-[#211E27] cursor-pointer"
-                            >
-                              <Archive className="w-4 h-4" />
                             </button>
                           )}
                         </div>
@@ -1287,7 +1294,7 @@ export function EmployeesTeamsView({
                   <input
                     type="text"
                     required
-                    disabled={Boolean(accountForm.id && accountForm.hasExistingUsername)}
+                    disabled={Boolean(accountForm.id && !isAdmin)}
                     value={accountForm.username}
                     onChange={(e) => setAccountForm({ ...accountForm, username: e.target.value })}
                     placeholder="Ex. admin"
@@ -1302,12 +1309,17 @@ export function EmployeesTeamsView({
                   <input
                     type="text"
                     required
-                    disabled={Boolean(accountForm.id && accountForm.hasExistingMatricule)}
+                    disabled={Boolean(accountForm.id && !isAdmin)}
                     value={accountForm.matricule}
                     onChange={(e) => setAccountForm({ ...accountForm, matricule: e.target.value })}
                     placeholder="Ex. OWT0001"
                     className="w-full px-3 py-2 font-mono bg-white dark:bg-[#211E27] text-slate-900 dark:text-white border border-slate-300 dark:border-[#393342] rounded-lg focus:outline-none focus:border-[#A83CE2] disabled:opacity-60"
                   />
+                  {accountForm.id && !isAdmin && (
+                    <p className="text-[11px] text-slate-500 dark:text-[#C8C2D0] mt-1">
+                      Seul un administrateur peut modifier le matricule.
+                    </p>
+                  )}
                 </div>
               )}
 
@@ -1336,9 +1348,7 @@ export function EmployeesTeamsView({
                           ? 'Siège'
                           : accountForm.site,
                       dailyTargetDossiers:
-                        nextRole === 'employee'
-                          ? accountForm.dailyTargetDossiers || 35
-                          : 0,
+                        nextRole === 'employee' ? accountForm.dailyTargetDossiers : '',
                     });
                   }}
                   className="w-full px-3 py-2 bg-white dark:bg-[#211E27] text-slate-900 dark:text-white border border-slate-300 dark:border-[#393342] rounded-lg focus:outline-none focus:border-[#A83CE2] disabled:opacity-60"
@@ -1470,18 +1480,20 @@ export function EmployeesTeamsView({
               {accountForm.role === 'employee' && (
                 <div>
                   <label className="block font-medium text-slate-700 dark:text-[#C8C2D0] mb-1">
-                    Objectif / jour
+                    Objectif / jour (facultatif)
                   </label>
                   <input
                     type="number"
                     min={1}
-                    value={accountForm.dailyTargetDossiers || 35}
+                    step={1}
+                    value={accountForm.dailyTargetDossiers}
                     onChange={(e) =>
                       setAccountForm({
                         ...accountForm,
-                        dailyTargetDossiers: Number(e.target.value) || 1,
+                        dailyTargetDossiers: e.target.value,
                       })
                     }
+                    placeholder="Non défini"
                     className="w-full px-3 py-2 font-mono bg-white dark:bg-[#211E27] text-slate-900 dark:text-white border border-slate-300 dark:border-[#393342] rounded-lg focus:outline-none focus:border-[#A83CE2]"
                   />
                 </div>
@@ -1494,7 +1506,11 @@ export function EmployeesTeamsView({
                   </label>
                   <select
                     value={accountForm.accountStatus}
-                    disabled={Boolean(accountForm.isPrimaryAdmin) || isSupervisor}
+                    disabled={
+                      !isAdmin ||
+                      Boolean(accountForm.isPrimaryAdmin) ||
+                      accountForm.id === user.id
+                    }
                     onChange={(e) =>
                       setAccountForm({
                         ...accountForm,
@@ -1505,7 +1521,9 @@ export function EmployeesTeamsView({
                   >
                     <option value="actif">Actif</option>
                     <option value="desactive">Désactivé</option>
-                    <option value="archive">Archivé</option>
+                    {accountForm.accountStatus === 'archive' && (
+                      <option value="archive">Archivé</option>
+                    )}
                   </select>
                 </div>
               )}
@@ -1661,8 +1679,19 @@ export function EmployeesTeamsView({
               <div className="p-3 bg-slate-50 dark:bg-[#211E27] rounded-lg border border-slate-200 dark:border-[#393342]">
                 <div className="text-slate-500 dark:text-[#C8C2D0]">Dossiers jour</div>
                 <div className="text-base font-bold font-mono text-slate-900 dark:text-white mt-1">
-                  {inspectedEmp.dossiersToday} / {inspectedEmp.dailyTargetDossiers}
+                  {typeof inspectedEmp.dailyTargetDossiers === 'number' &&
+                  inspectedEmp.dailyTargetDossiers > 0
+                    ? `${inspectedEmp.dossiersToday} / ${inspectedEmp.dailyTargetDossiers}`
+                    : `${inspectedEmp.dossiersToday}`}
                 </div>
+                {!(
+                  typeof inspectedEmp.dailyTargetDossiers === 'number' &&
+                  inspectedEmp.dailyTargetDossiers > 0
+                ) && (
+                  <div className="text-[11px] text-slate-500 dark:text-[#C8C2D0] mt-0.5">
+                    Objectif non défini
+                  </div>
+                )}
               </div>
               <div className="p-3 bg-slate-50 dark:bg-[#211E27] rounded-lg border border-slate-200 dark:border-[#393342]">
                 <div className="text-slate-500 dark:text-[#C8C2D0]">Contrôles qualité</div>
@@ -2072,6 +2101,80 @@ export function EmployeesTeamsView({
                 </div>
               </div>
             )}
+          </div>
+        </div>
+      )}
+
+      {/* Modal Confirmation Désactivation */}
+      {pendingDeactivation && (
+        <div className="fixed inset-0 z-50 flex items-center justify-center p-4">
+          <div
+            className="fixed inset-0 bg-slate-900/50 dark:bg-black/70"
+            onClick={() => setPendingDeactivation(null)}
+            aria-hidden="true"
+          />
+          <div className="relative bg-white dark:bg-[#292631] border border-slate-200 dark:border-[#393342] rounded-xl max-w-md w-full p-6 space-y-4 shadow-xl z-10">
+            <div className="flex items-start justify-between gap-3">
+              <div className="flex items-center gap-2.5 text-amber-700 dark:text-amber-400">
+                <AlertTriangle className="w-5 h-5 shrink-0" aria-hidden="true" />
+                <h3 className="text-base font-bold text-slate-900 dark:text-white">
+                  Confirmer la désactivation du compte
+                </h3>
+              </div>
+              <button
+                type="button"
+                onClick={() => setPendingDeactivation(null)}
+                className="p-1.5 rounded-lg text-slate-400 dark:text-[#C8C2D0] hover:text-slate-700 dark:hover:text-white cursor-pointer"
+                aria-label="Fermer"
+              >
+                <X className="w-4 h-4" />
+              </button>
+            </div>
+
+            <div className="bg-slate-50 dark:bg-[#211E27] border border-slate-200 dark:border-[#393342] rounded-lg p-3.5 text-xs space-y-1">
+              <div className="font-semibold text-sm text-slate-900 dark:text-white">
+                {pendingDeactivation.fullName}
+              </div>
+              <div className="font-mono text-[#7624A8] dark:text-[#D896FF]">
+                {pendingDeactivation.role === 'admin' ? 'Identifiant' : 'Matricule'} :{' '}
+                {pendingDeactivation.matricule || pendingDeactivation.username || '—'}
+              </div>
+              <div className="text-slate-500 dark:text-[#C8C2D0]">
+                Rôle : {ROLE_LABELS[pendingDeactivation.role]}
+              </div>
+            </div>
+
+            <p className="text-xs text-slate-600 dark:text-[#C8C2D0] leading-relaxed">
+              Ce compte sera immédiatement bloqué à la connexion et exclu des effectifs actifs et
+              nouvelles affectations. Aucune donnée historique (activités, statistiques, contrôles
+              qualité, horaires et journal d’audit) ne sera supprimée et le compte pourra être
+              réactivé ultérieurement.
+            </p>
+
+            <div className="flex justify-end gap-2 pt-2">
+              <button
+                type="button"
+                onClick={() => setPendingDeactivation(null)}
+                className="px-4 py-2 text-xs font-semibold text-slate-600 dark:text-[#C8C2D0] hover:bg-slate-100 dark:hover:bg-[#211E27] rounded-lg cursor-pointer"
+              >
+                Annuler
+              </button>
+              <button
+                type="button"
+                onClick={() => {
+                  const target = pendingDeactivation;
+                  setPendingDeactivation(null);
+                  handleStatusChange(
+                    target,
+                    'desactive',
+                    'Désactivation du compte par administrateur'
+                  );
+                }}
+                className="px-4 py-2 bg-amber-600 hover:bg-amber-700 text-white text-xs font-semibold rounded-lg cursor-pointer"
+              >
+                Confirmer la désactivation
+              </button>
+            </div>
           </div>
         </div>
       )}

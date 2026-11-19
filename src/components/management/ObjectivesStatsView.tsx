@@ -66,18 +66,23 @@ export function ObjectivesStatsView({
   const [companyFilter, setCompanyFilter] = useState<string>('all');
   const [taskFilter, setTaskFilter] = useState<string>('all');
 
-  const employeeAccounts = useMemo(
-    () => employees.filter((e) => e.role === 'employee' && e.accountStatus !== 'archive'),
+  const activeEmployeeAccounts = useMemo(
+    () => employees.filter((e) => e.role === 'employee' && e.accountStatus === 'actif'),
+    [employees]
+  );
+
+  const allEmployeeAccounts = useMemo(
+    () => employees.filter((e) => e.role === 'employee'),
     [employees]
   );
 
   // Formulaire nouvel objectif
   const [objScopeType, setObjScopeType] = useState<'employee' | 'team'>('employee');
-  const [objScopeId, setObjScopeId] = useState<string>(employeeAccounts[0]?.id ?? '');
+  const [objScopeId, setObjScopeId] = useState<string>(activeEmployeeAccounts[0]?.id ?? '');
   const [objCompanyId, setObjCompanyId] = useState<string>('all');
   const [objTaskId, setObjTaskId] = useState<string>('all');
   const [objPeriod, setObjPeriod] = useState<ObjectivePeriod>('jour');
-  const [objTarget, setObjTarget] = useState<number>(35);
+  const [objTarget, setObjTarget] = useState<number>(1);
 
   const [refDrafts, setRefDrafts] = useState<Record<string, number>>({});
 
@@ -85,13 +90,25 @@ export function ObjectivesStatsView({
   const todayYmd = toYmd(now);
 
   const scopedEmployees = useMemo(() => {
-    return employeeAccounts.filter((e) => {
+    return allEmployeeAccounts.filter((e) => {
       if (isSupervisor && user.teamId && e.teamId !== user.teamId) return false;
       if (teamFilter !== 'all' && e.teamId !== teamFilter) return false;
       if (employeeFilter !== 'all' && e.id !== employeeFilter) return false;
+      if (e.accountStatus !== 'actif' && employeeFilter === 'all') {
+        const hasHistory =
+          e.dossiersToday > 0 || qualityControls.some((q) => q.employeeId === e.id);
+        if (!hasHistory) return false;
+      }
       return true;
     });
-  }, [employeeAccounts, isSupervisor, user.teamId, teamFilter, employeeFilter]);
+  }, [
+    allEmployeeAccounts,
+    isSupervisor,
+    user.teamId,
+    teamFilter,
+    employeeFilter,
+    qualityControls,
+  ]);
 
   const filteredQc = useMemo(() => {
     return qualityControls.filter((q) => {
@@ -152,10 +169,16 @@ export function ObjectivesStatsView({
     const rejectRate =
       controlled.length > 0 ? Math.round((rejected / controlled.length) * 100) : 0;
 
-    const totalTarget = scopedEmployees.reduce((s, e) => s + e.dailyTargetDossiers, 0);
-    const actualToday = scopedEmployees.reduce((s, e) => s + e.dossiersToday, 0);
+    const employeesWithTarget = scopedEmployees.filter(
+      (e) => typeof e.dailyTargetDossiers === 'number' && e.dailyTargetDossiers > 0
+    );
+    const totalTarget = employeesWithTarget.reduce(
+      (s, e) => s + (e.dailyTargetDossiers ?? 0),
+      0
+    );
+    const actualTodayWithTarget = employeesWithTarget.reduce((s, e) => s + e.dossiersToday, 0);
     const objectiveAttainment =
-      totalTarget > 0 ? Math.round((actualToday / totalTarget) * 100) : 0;
+      totalTarget > 0 ? Math.round((actualTodayWithTarget / totalTarget) * 100) : null;
 
     return {
       totalDossiers,
@@ -195,16 +218,19 @@ export function ObjectivesStatsView({
       ).length;
       const qcPct =
         controlled.length > 0 ? Math.round((compliant / controlled.length) * 100) : null;
-      const objPct =
-        emp.dailyTargetDossiers > 0
-          ? Math.round((emp.dossiersToday / emp.dailyTargetDossiers) * 100)
-          : 0;
+      const hasTarget =
+        typeof emp.dailyTargetDossiers === 'number' && emp.dailyTargetDossiers > 0;
+      const objPct = hasTarget
+        ? Math.round((emp.dossiersToday / emp.dailyTargetDossiers!) * 100)
+        : null;
+      const gap = hasTarget ? emp.dossiersToday - emp.dailyTargetDossiers! : null;
       return {
         emp,
         weightedIndex,
         qcPct,
+        hasTarget,
         objPct,
-        gap: emp.dossiersToday - emp.dailyTargetDossiers,
+        gap,
       };
     });
   }, [scopedEmployees, filteredQc, referenceTimes]);
@@ -291,11 +317,12 @@ export function ObjectivesStatsView({
             className="px-3 py-2 text-xs border border-slate-300 dark:border-[#393342] rounded-lg bg-white dark:bg-[#211E27] text-slate-900 dark:text-white focus:outline-none focus:border-[#A83CE2]"
           >
             <option value="all">Tous les employés</option>
-            {employeeAccounts
+            {allEmployeeAccounts
               .filter((e) => !isSupervisor || e.teamId === user.teamId)
               .map((e) => (
                 <option key={e.id} value={e.id}>
                   {e.fullName}
+                  {e.accountStatus !== 'actif' ? ' (Désactivé)' : ''}
                 </option>
               ))}
           </select>
@@ -372,8 +399,8 @@ export function ObjectivesStatsView({
         />
         <StatTile
           label="Atteinte des objectifs"
-          value={`${analytics.objectiveAttainment}%`}
-          subtext="Pondération selon temps de référence active"
+          value={analytics.objectiveAttainment !== null ? `${analytics.objectiveAttainment}%` : 'Non défini'}
+          subtext="Calculé sur les comptes ayant un objectif défini"
         />
       </div>
 
@@ -407,11 +434,16 @@ export function ObjectivesStatsView({
                     </td>
                   </tr>
                 ) : (
-                  weightedEmployeeRows.map(({ emp, weightedIndex, qcPct, objPct, gap }) => (
+                  weightedEmployeeRows.map(({ emp, weightedIndex, qcPct, hasTarget, objPct, gap }) => (
                     <tr key={emp.id} className="hover:bg-[#F7EEFC]/40 dark:hover:bg-[#211E27]/70">
                       <td className="py-3 px-5">
                         <div className="font-medium text-slate-900 dark:text-white">
                           {emp.fullName}
+                          {emp.accountStatus !== 'actif' && (
+                            <span className="ml-2 text-[11px] font-normal text-amber-700 dark:text-amber-400">
+                              (Désactivé)
+                            </span>
+                          )}
                         </div>
                         <div className="text-xs text-slate-500 dark:text-[#C8C2D0]">
                           Présence {formatDurationHM(emp.presenceSecondsToday)} · Productif{' '}
@@ -419,19 +451,32 @@ export function ObjectivesStatsView({
                         </div>
                       </td>
                       <td className="py-3 px-4 text-right font-mono text-xs">
-                        <span className="font-semibold text-slate-900 dark:text-white">
-                          {emp.dossiersToday} / {emp.dailyTargetDossiers}
-                        </span>{' '}
-                        <span className="text-slate-500 dark:text-[#C8C2D0]">({objPct}%)</span>
+                        {hasTarget ? (
+                          <>
+                            <span className="font-semibold text-slate-900 dark:text-white">
+                              {emp.dossiersToday} / {emp.dailyTargetDossiers}
+                            </span>{' '}
+                            <span className="text-slate-500 dark:text-[#C8C2D0]">({objPct}%)</span>
+                          </>
+                        ) : (
+                          <>
+                            <span className="font-semibold text-slate-900 dark:text-white">
+                              {emp.dossiersToday}
+                            </span>{' '}
+                            <span className="text-slate-500 dark:text-[#C8C2D0]">(Non défini)</span>
+                          </>
+                        )}
                       </td>
                       <td
                         className={`py-3 px-4 text-right font-mono text-xs font-semibold ${
-                          gap >= 0
+                          gap === null
+                            ? 'text-slate-400 dark:text-[#C8C2D0]/60'
+                            : gap >= 0
                             ? 'text-emerald-700 dark:text-emerald-400'
                             : 'text-amber-700 dark:text-amber-400'
                         }`}
                       >
-                        {gap >= 0 ? `+${gap}` : gap}
+                        {gap === null ? '—' : gap >= 0 ? `+${gap}` : gap}
                       </td>
                       <td className="py-3 px-4 text-right font-mono text-xs font-semibold text-[#7624A8] dark:text-[#D896FF]">
                         {weightedIndex}%
@@ -497,7 +542,7 @@ export function ObjectivesStatsView({
                   const next = e.target.value as 'employee' | 'team';
                   setObjScopeType(next);
                   setObjScopeId(
-                    next === 'employee' ? employeeAccounts[0]?.id ?? '' : teams[0]?.id ?? ''
+                    next === 'employee' ? activeEmployeeAccounts[0]?.id ?? '' : teams[0]?.id ?? ''
                   );
                 }}
                 className="px-2.5 py-2 border border-slate-300 dark:border-[#393342] rounded-lg bg-white dark:bg-[#211E27] text-slate-900 dark:text-white focus:outline-none focus:border-[#A83CE2]"
@@ -511,10 +556,10 @@ export function ObjectivesStatsView({
                 className="px-2.5 py-2 border border-slate-300 dark:border-[#393342] rounded-lg bg-white dark:bg-[#211E27] text-slate-900 dark:text-white focus:outline-none focus:border-[#A83CE2]"
               >
                 {objScopeType === 'employee'
-                  ? employeeAccounts.length === 0 ? (
-                      <option value="">Aucun employé disponible</option>
+                  ? activeEmployeeAccounts.length === 0 ? (
+                      <option value="">Aucun employé actif disponible</option>
                     ) : (
-                      employeeAccounts.map((e) => (
+                      activeEmployeeAccounts.map((e) => (
                         <option key={e.id} value={e.id}>
                           {e.fullName}
                         </option>

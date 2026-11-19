@@ -66,8 +66,12 @@ export function EmployeeDashboard({
   const treatmentsToday = todayActivities.filter((a) => a.type === 'traitement');
 
   const dossiersCount = treatmentsToday.length;
-  const target = user.dailyTargetDossiers || 35;
-  const progressPercent = Math.min(100, Math.round((dossiersCount / target) * 100));
+  const target =
+    typeof user.dailyTargetDossiers === 'number' && user.dailyTargetDossiers > 0
+      ? user.dailyTargetDossiers
+      : null;
+  const progressPercent =
+    target !== null ? Math.min(100, Math.round((dossiersCount / target) * 100)) : null;
   const productiveRatio =
     livePresenceSeconds > 0
       ? Math.min(100, Math.round((liveProductiveSeconds / livePresenceSeconds) * 100))
@@ -265,7 +269,7 @@ export function EmployeeDashboard({
         <StatTile
           label="Dossiers traités"
           value={dossiersCount}
-          subtext={`Objectif : ${target}`}
+          subtext={target !== null ? `Objectif : ${target}` : 'Objectif non défini'}
           accent="emerald"
         />
         <div className="bg-white dark:bg-[#292631] border border-slate-200 dark:border-[#393342] rounded-lg p-5 flex flex-col justify-between gap-2">
@@ -274,18 +278,24 @@ export function EmployeeDashboard({
               Objectif journalier
             </span>
             <span className="text-xs font-mono tabular-nums font-semibold text-slate-700 dark:text-white">
-              {dossiersCount} / {target}
+              {target !== null ? `${dossiersCount} / ${target}` : 'Non défini'}
             </span>
           </div>
           <div className="text-2xl font-bold font-mono tabular-nums text-[#A83CE2]">
-            {progressPercent}%
+            {progressPercent !== null ? `${progressPercent}%` : '—'}
           </div>
-          <div className="w-full h-2 bg-[#F7EEFC] dark:bg-[#211E27] rounded-full overflow-hidden">
-            <div
-              className="h-full bg-[#A83CE2] transition-all duration-300"
-              style={{ width: `${progressPercent}%` }}
-            />
-          </div>
+          {progressPercent !== null ? (
+            <div className="w-full h-2 bg-[#F7EEFC] dark:bg-[#211E27] rounded-full overflow-hidden">
+              <div
+                className="h-full bg-[#A83CE2] transition-all duration-300"
+                style={{ width: `${progressPercent}%` }}
+              />
+            </div>
+          ) : (
+            <div className="text-[11px] text-slate-500 dark:text-[#C8C2D0]">
+              Aucun objectif défini
+            </div>
+          )}
         </div>
       </section>
 

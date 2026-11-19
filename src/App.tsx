@@ -682,6 +682,7 @@ export default function App() {
           {safeModule === 'mgmt_schedules' && (
             <SchedulesOutingsView
               user={currentUser}
+              employees={employees}
               schedules={schedules}
               outingRequests={outingRequests}
               canApproveOutings={hasPermission(

@@ -226,6 +226,7 @@ export function ReportsView({
               .map((e) => (
                 <option key={e.id} value={e.id}>
                   {e.fullName}
+                  {e.accountStatus !== 'actif' ? ' (Désactivé)' : ''}
                 </option>
               ))}
           </select>

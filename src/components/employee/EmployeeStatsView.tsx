@@ -118,10 +118,12 @@ export function EmployeeStatsView({
       d.getDate() === now.getDate()
     );
   }).length;
-  const objectivePct = Math.min(
-    100,
-    Math.round((dossiersTodayCount / (user.dailyTargetDossiers || 35)) * 100)
-  );
+  const target =
+    typeof user.dailyTargetDossiers === 'number' && user.dailyTargetDossiers > 0
+      ? user.dailyTargetDossiers
+      : null;
+  const objectivePct =
+    target !== null ? Math.min(100, Math.round((dossiersTodayCount / target) * 100)) : null;
 
   return (
     <div className="space-y-6">
@@ -131,7 +133,11 @@ export function EmployeeStatsView({
         <StatTile
           label="Dossiers traités (historique)"
           value={treatments.length}
-          subtext={`Objectif jour : ${objectivePct}% (${dossiersTodayCount}/${user.dailyTargetDossiers})`}
+          subtext={
+            target !== null && objectivePct !== null
+              ? `Objectif jour : ${objectivePct}% (${dossiersTodayCount}/${target})`
+              : `Aujourd’hui : ${dossiersTodayCount} dossier(s) · Objectif : Non défini`
+          }
           accent="primary"
         />
         <StatTile

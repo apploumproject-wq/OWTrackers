@@ -3,6 +3,7 @@ import { Check, Save, X } from 'lucide-react';
 import {
   AppUser,
   EmployeeScheduleConfig,
+  ManagedEmployee,
   OutingAuthorizationRequest,
 } from '../../core/types';
 import { OUTING_REASON_CONFIG } from '../../core/permissions';
@@ -11,6 +12,7 @@ import { SectionHeader } from '../ui/DataPrimitives';
 
 interface SchedulesOutingsViewProps {
   user: AppUser;
+  employees: ManagedEmployee[];
   schedules: EmployeeScheduleConfig[];
   outingRequests: OutingAuthorizationRequest[];
   canApproveOutings: boolean;
@@ -20,6 +22,7 @@ interface SchedulesOutingsViewProps {
 
 export function SchedulesOutingsView({
   user,
+  employees,
   schedules,
   outingRequests,
   canApproveOutings,
@@ -32,10 +35,14 @@ export function SchedulesOutingsView({
   const [draftRestDays, setDraftRestDays] = useState('Samedi, Dimanche');
   const [draftNote, setDraftNote] = useState('');
 
+  const activeUserIds = new Set(
+    employees.filter((e) => e.accountStatus === 'actif').map((e) => e.id)
+  );
+  const activeSchedules = schedules.filter((s) => activeUserIds.has(s.userId));
   const scopedSchedules =
     user.role === 'supervisor' && user.teamId
-      ? schedules.filter((s) => s.teamId === user.teamId)
-      : schedules;
+      ? activeSchedules.filter((s) => s.teamId === user.teamId)
+      : activeSchedules;
 
   const scopedOutings =
     user.role === 'supervisor' && user.teamId

@@ -52,7 +52,7 @@ export function ManagementDashboard({
   const scopedEmployees = useMemo(
     () =>
       employees.filter((e) => {
-        if (e.accountStatus === 'archive' || e.role !== 'employee') return false;
+        if (e.accountStatus !== 'actif' || e.role !== 'employee') return false;
         if (isSupervisor && user.teamId) return e.teamId === user.teamId;
         return true;
       }),
@@ -94,7 +94,15 @@ export function ManagementDashboard({
   const presentCount = scopedEmployees.filter((e) => e.status !== 'absent').length;
   const pausedCount = scopedEmployees.filter((e) => e.status === 'paused').length;
   const totalDossiersToday = scopedEmployees.reduce((s, e) => s + e.dossiersToday, 0);
-  const totalTargetToday = scopedEmployees.reduce((s, e) => s + e.dailyTargetDossiers, 0);
+  const employeesWithTarget = scopedEmployees.filter(
+    (e) => typeof e.dailyTargetDossiers === 'number' && e.dailyTargetDossiers > 0
+  );
+  const totalTargetToday = employeesWithTarget.reduce(
+    (s, e) => s + (e.dailyTargetDossiers ?? 0),
+    0
+  );
+  const targetSubtext =
+    employeesWithTarget.length > 0 ? `Objectif : ${totalTargetToday}` : 'Objectif : Non défini';
 
   const kpis = isSupervisor
     ? [
@@ -107,7 +115,7 @@ export function ManagementDashboard({
         {
           label: 'Dossiers traités (équipe)',
           value: totalDossiersToday,
-          subtext: `Objectif : ${totalTargetToday}`,
+          subtext: targetSubtext,
           accent: 'primary' as const,
         },
         {
@@ -134,7 +142,7 @@ export function ManagementDashboard({
         {
           label: 'Dossiers du jour',
           value: totalDossiersToday,
-          subtext: `Objectif : ${totalTargetToday}`,
+          subtext: targetSubtext,
           accent: 'primary' as const,
         },
         {
@@ -299,7 +307,7 @@ export function ManagementDashboard({
                 ) : (
                   scopedTeams.map((team) => {
                     const members = employees.filter(
-                      (e) => e.teamId === team.id && e.accountStatus !== 'archive'
+                      (e) => e.teamId === team.id && e.accountStatus === 'actif'
                     );
                     const active = members.filter((m) => m.status !== 'absent').length;
                     const comp = companies.find((c) => c.id === team.defaultCompanyId);
@@ -422,7 +430,10 @@ export function ManagementDashboard({
                       {formatDurationHM(emp.pauseSecondsToday)}
                     </td>
                     <td className="py-3 px-5 text-right font-mono tabular-nums text-xs font-semibold text-slate-900 dark:text-white whitespace-nowrap">
-                      {emp.dossiersToday} / {emp.dailyTargetDossiers}
+                      {emp.dossiersToday}
+                      {typeof emp.dailyTargetDossiers === 'number' && emp.dailyTargetDossiers > 0
+                        ? ` / ${emp.dailyTargetDossiers}`
+                        : ''}
                     </td>
                   </tr>
                 ))
