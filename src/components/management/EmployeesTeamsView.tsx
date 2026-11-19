@@ -1298,26 +1298,37 @@ export function EmployeesTeamsView({
                     value={accountForm.username}
                     onChange={(e) => setAccountForm({ ...accountForm, username: e.target.value })}
                     placeholder="Ex. admin"
+                    autoComplete="off"
                     className="w-full px-3 py-2 font-mono bg-white dark:bg-[#211E27] text-slate-900 dark:text-white border border-slate-300 dark:border-[#393342] rounded-lg focus:outline-none focus:border-[#A83CE2] disabled:opacity-60"
                   />
                 </div>
               ) : (
                 <div>
-                  <label className="block font-medium text-slate-700 dark:text-[#C8C2D0] mb-1">
+                  <label
+                    htmlFor="owt-account-matricule"
+                    className="block font-medium text-slate-700 dark:text-[#C8C2D0] mb-1"
+                  >
                     Matricule *
                   </label>
                   <input
+                    id="owt-account-matricule"
                     type="text"
                     required
                     disabled={Boolean(accountForm.id && !isAdmin)}
                     value={accountForm.matricule}
                     onChange={(e) => setAccountForm({ ...accountForm, matricule: e.target.value })}
                     placeholder="Ex. OWT0001"
+                    autoComplete="off"
                     className="w-full px-3 py-2 font-mono bg-white dark:bg-[#211E27] text-slate-900 dark:text-white border border-slate-300 dark:border-[#393342] rounded-lg focus:outline-none focus:border-[#A83CE2] disabled:opacity-60"
                   />
                   {accountForm.id && !isAdmin && (
                     <p className="text-[11px] text-slate-500 dark:text-[#C8C2D0] mt-1">
                       Seul un administrateur peut modifier le matricule.
+                    </p>
+                  )}
+                  {accountForm.id && isAdmin && (
+                    <p className="text-[11px] text-[#7624A8] dark:text-[#D896FF] mt-1">
+                      Modifiable par l’administrateur : devient immédiatement l’identifiant de connexion.
                     </p>
                   )}
                 </div>
@@ -1479,13 +1490,18 @@ export function EmployeesTeamsView({
 
               {accountForm.role === 'employee' && (
                 <div>
-                  <label className="block font-medium text-slate-700 dark:text-[#C8C2D0] mb-1">
+                  <label
+                    htmlFor="owt-account-daily-target"
+                    className="block font-medium text-slate-700 dark:text-[#C8C2D0] mb-1"
+                  >
                     Objectif / jour (facultatif)
                   </label>
                   <input
+                    id="owt-account-daily-target"
                     type="number"
-                    min={1}
-                    step={1}
+                    step="any"
+                    inputMode="numeric"
+                    autoComplete="off"
                     value={accountForm.dailyTargetDossiers}
                     onChange={(e) =>
                       setAccountForm({
@@ -1494,7 +1510,7 @@ export function EmployeesTeamsView({
                       })
                     }
                     placeholder="Non défini"
-                    className="w-full px-3 py-2 font-mono bg-white dark:bg-[#211E27] text-slate-900 dark:text-white border border-slate-300 dark:border-[#393342] rounded-lg focus:outline-none focus:border-[#A83CE2]"
+                    className="w-full px-3 py-2 font-mono bg-white dark:bg-[#211E27] text-slate-900 dark:text-white border border-slate-300 dark:border-[#393342] rounded-lg focus:outline-none focus:border-[#A83CE2] [appearance:textfield] [&::-webkit-outer-spin-button]:appearance-none [&::-webkit-inner-spin-button]:appearance-none"
                   />
                 </div>
               )}
