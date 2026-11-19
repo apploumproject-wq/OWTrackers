@@ -142,7 +142,9 @@ export function AppShell({
               {ROLE_LABELS[currentUser.role]}
             </span>
             <span aria-hidden="true">·</span>
-            <span className="font-mono">{currentUser.matricule}</span>
+            <span className="font-mono">
+              {currentUser.username || currentUser.matricule || ''}
+            </span>
           </div>
         </div>
         <button
@@ -203,7 +205,7 @@ export function AppShell({
 
           <div className="flex items-center gap-3 shrink-0 text-xs">
             <span className="hidden sm:inline font-mono text-slate-500 dark:text-[#C8C2D0]">
-              {currentUser.matricule}
+              {currentUser.username || currentUser.matricule || ''}
             </span>
             <button
               type="button"

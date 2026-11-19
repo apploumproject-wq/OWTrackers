@@ -50,7 +50,7 @@ export function LoginScreen({ onLogin }: LoginScreenProps) {
               Connexion à OWTrackers
             </h1>
             <p className="text-xs text-slate-500 dark:text-[#C8C2D0]">
-              Saisissez votre identifiant (matricule) ou votre adresse e-mail professionnelle.
+              Utilisez votre identifiant administrateur, votre matricule ou votre adresse e-mail (si renseignée).
             </p>
           </div>
 
@@ -60,7 +60,7 @@ export function LoginScreen({ onLogin }: LoginScreenProps) {
                 htmlFor="login-identifier"
                 className="block text-xs font-medium text-slate-700 dark:text-[#C8C2D0] mb-1.5"
               >
-                Identifiant ou adresse e-mail
+                Identifiant ou matricule
               </label>
               <input
                 id="login-identifier"
@@ -69,7 +69,7 @@ export function LoginScreen({ onLogin }: LoginScreenProps) {
                 autoComplete="username"
                 value={identifier}
                 onChange={(e) => setIdentifier(e.target.value)}
-                placeholder="OW-0001 ou nom@entreprise.com"
+                placeholder="Ex. admin ou OWT0001"
                 className="w-full px-3.5 py-2.5 text-sm bg-white dark:bg-[#211E27] text-slate-900 dark:text-white placeholder:text-slate-400 dark:placeholder:text-[#C8C2D0]/50 border border-slate-300 dark:border-[#393342] rounded-lg focus:outline-none focus:border-[#A83CE2]"
               />
             </div>
@@ -160,8 +160,9 @@ export function LoginScreen({ onLogin }: LoginScreenProps) {
               réinitialisation automatique sans serveur n’est possible en mode test local.
             </p>
             <p className="text-xs text-slate-600 dark:text-[#C8C2D0] leading-relaxed">
-              Veuillez contacter un <strong className="text-slate-900 dark:text-white">Administrateur</strong> ou un{' '}
-              <strong className="text-slate-900 dark:text-white">Manager</strong> autorisé pour définir un nouveau mot de passe temporaire depuis le module Utilisateurs. En production, ce lien déclenchera l’envoi d’un jeton sécurisé par e-mail via le backend PostgreSQL.
+              Communiquez votre <strong className="text-slate-900 dark:text-white">identifiant ou matricule</strong> à un{' '}
+              <strong className="text-slate-900 dark:text-white">Administrateur</strong> ou à un{' '}
+              <strong className="text-slate-900 dark:text-white">Manager</strong> autorisé pour définir un nouveau mot de passe depuis le module Utilisateurs. En production avec PostgreSQL, ce flux utilisera un jeton sécurisé géré par le serveur.
             </p>
             <div className="flex justify-end pt-1">
               <button

@@ -33,7 +33,12 @@ import {
   ThemeMode,
 } from './core/types';
 import { canAccessModule, getDefaultModuleForRole, hasPermission } from './core/permissions';
-import { CreateUserInput, clockService, storageService } from './services/storageService';
+import {
+  CreateUserInput,
+  ExcelImportExecutionResult,
+  clockService,
+  storageService,
+} from './services/storageService';
 import { InitialAdminSetupScreen } from './components/auth/InitialAdminSetupScreen';
 import { LoginScreen } from './components/auth/LoginScreen';
 import { AppShell } from './components/layout/AppShell';
@@ -321,13 +326,42 @@ export default function App() {
     setAuditLogs(storageService.getAuditLogs());
   };
 
-  const handleCreateAccount = async (input: CreateUserInput): Promise<{ error?: string }> => {
+  const handleCreateAccount = async (
+    input: CreateUserInput
+  ): Promise<{
+    error?: string;
+    createdMatricule?: string;
+    provisionalPassword?: string;
+  }> => {
     if (!currentUser) return { error: 'Session expirée.' };
     const res = await storageService.createManagedUser(input, currentUser);
     setEmployees(res.users);
     setSchedules(storageService.getSchedules());
     setAuditLogs(storageService.getAuditLogs());
-    return res.error ? { error: res.error } : {};
+    return res.error
+      ? { error: res.error }
+      : {
+          createdMatricule: res.created?.matricule,
+          provisionalPassword: res.provisionalPassword,
+        };
+  };
+
+  const handleImportEmployeesExcel = async (
+    rows: Array<{ rowNumber: number; fullName: string; matricule: string }>
+  ): Promise<ExcelImportExecutionResult> => {
+    if (!currentUser) {
+      return {
+        users: employees,
+        createdAccounts: [],
+        rejectedItems: [],
+        error: 'Session expirée.',
+      };
+    }
+    const res = await storageService.importEmployeesFromExcel(rows, currentUser);
+    setEmployees(res.users);
+    setSchedules(storageService.getSchedules());
+    setAuditLogs(storageService.getAuditLogs());
+    return res;
   };
 
   const handleUpdateAccount = async (
@@ -335,6 +369,8 @@ export default function App() {
     patch: Partial<
       Pick<
         ManagedEmployee,
+        | 'username'
+        | 'matricule'
         | 'fullName'
         | 'email'
         | 'role'
@@ -622,6 +658,7 @@ export default function App() {
               correctionRequests={correctionRequests}
               qualityControls={qualityControls}
               onCreateAccount={handleCreateAccount}
+              onImportEmployeesExcel={handleImportEmployeesExcel}
               onUpdateAccount={handleUpdateAccount}
               onSetAccountStatus={handleSetAccountStatus}
               onSaveTeam={handleSaveTeam}

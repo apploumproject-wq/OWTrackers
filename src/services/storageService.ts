@@ -44,7 +44,12 @@ import {
   INITIAL_REFERENCE_TIMES,
   INITIAL_TASKS,
 } from '../data/mockData';
-import { hashPassword, isValidEmail, verifyPassword } from '../utils/crypto';
+import {
+  buildProvisionalPassword,
+  hashPassword,
+  isValidEmail,
+  verifyPassword,
+} from '../utils/crypto';
 import {
   generateUniqueId,
   isSameDayYmd,
@@ -161,9 +166,10 @@ function buildAppUser(
 
   return {
     id: account.id,
-    matricule: account.matricule,
+    username: account.username?.trim() || undefined,
+    matricule: account.matricule?.trim() || undefined,
     fullName: account.fullName,
-    email: account.email,
+    email: account.email?.trim() || undefined,
     role: account.role,
     isPrimaryAdmin: account.isPrimaryAdmin,
     jobTitle: account.jobTitle?.trim() || defaultJobTitle,
@@ -180,9 +186,11 @@ function buildAppUser(
 }
 
 export interface CreateUserInput {
+  username?: string;
+  matricule?: string;
   fullName: string;
-  email: string;
-  password: string;
+  email?: string;
+  password?: string;
   role: UserRole;
   jobTitle?: string;
   site: string;
@@ -192,6 +200,24 @@ export interface CreateUserInput {
   plannedEnd?: string;
   restDays?: string[];
   dailyTargetDossiers?: number;
+}
+
+export interface ExcelImportCreatedAccount {
+  fullName: string;
+  matricule: string;
+  provisionalPassword: string;
+}
+
+export interface ExcelImportExecutionResult {
+  users: ManagedEmployee[];
+  createdAccounts: ExcelImportCreatedAccount[];
+  rejectedItems: Array<{
+    rowNumber: number;
+    fullName: string;
+    matricule: string;
+    reason: string;
+  }>;
+  error?: string;
 }
 
 export const storageService = {
@@ -220,7 +246,9 @@ export const storageService = {
     const users = this.getUsers();
     let maxNum = 0;
     for (const u of users) {
-      const match = /^OW-(\d+)$/i.exec(u.matricule.trim());
+      const m = (u.matricule ?? '').trim();
+      if (!m) continue;
+      const match = /^OW-(\d+)$/i.exec(m);
       if (match) {
         const val = parseInt(match[1], 10);
         if (!Number.isNaN(val) && val > maxNum) {
@@ -233,8 +261,9 @@ export const storageService = {
   },
 
   async initializePrimaryAdmin(payload: {
+    username: string;
     fullName: string;
-    email: string;
+    email?: string;
     password: string;
   }): Promise<{ user?: AppUser; error?: string }> {
     const flagAlreadySet =
@@ -248,29 +277,47 @@ export const storageService = {
       };
     }
 
+    const cleanUsername = payload.username.trim();
     const fullName = payload.fullName.trim();
-    const email = payload.email.trim().toLowerCase();
+    const cleanEmail = payload.email?.trim().toLowerCase() ?? '';
     const password = payload.password;
 
+    if (cleanUsername.length < 2 || /\s/.test(cleanUsername)) {
+      return {
+        error:
+          'L’identifiant de connexion est obligatoire (2 caractères minimum, sans espace).',
+      };
+    }
     if (fullName.length < 2) {
       return { error: 'Veuillez renseigner le nom et le prénom.' };
     }
-    if (!isValidEmail(email)) {
+    if (cleanEmail && !isValidEmail(cleanEmail)) {
       return { error: 'Veuillez saisir une adresse e-mail valide.' };
     }
     if (password.length < 8) {
       return { error: 'Le mot de passe doit contenir au moins 8 caractères.' };
     }
 
+    const existingUsers = this.getUsers();
+    if (
+      existingUsers.some(
+        (u) =>
+          (u.username ?? '').trim().toLowerCase() === cleanUsername.toLowerCase() ||
+          (u.matricule ?? '').trim().toLowerCase() === cleanUsername.toLowerCase()
+      )
+    ) {
+      return { error: `L’identifiant "${cleanUsername}" est déjà utilisé.` };
+    }
+
     const passwordHash = await hashPassword(password);
-    const matricule = this.generateNextMatricule();
     const todayYmd = toYmd(new Date(clockService.nowMs()));
 
     const primaryAdmin: ManagedEmployee = {
       id: generateUniqueId('usr'),
-      matricule,
+      username: cleanUsername,
+      matricule: undefined,
       fullName,
-      email,
+      email: cleanEmail || undefined,
       role: 'admin',
       isPrimaryAdmin: true,
       passwordHash,
@@ -291,7 +338,6 @@ export const storageService = {
       pauseSecondsToday: 0,
     };
 
-    const existingUsers = this.getUsers();
     safeWriteJson(STORAGE_KEYS.ACCOUNTS, [primaryAdmin, ...existingUsers]);
     window.localStorage.setItem(STORAGE_KEYS.SYSTEM_INITIALIZED, 'true');
     this.setSessionUser(primaryAdmin.id);
@@ -301,7 +347,7 @@ export const storageService = {
       appUser,
       'Initialisation plateforme',
       'Aucun administrateur',
-      `${primaryAdmin.fullName} (${primaryAdmin.matricule})`,
+      `${primaryAdmin.fullName} (${cleanUsername})`,
       'Création du premier administrateur principal'
     );
 
@@ -318,14 +364,19 @@ export const storageService = {
     }
 
     const accounts = this.getUsers();
-    const account = accounts.find(
-      (u) =>
-        u.matricule.trim().toLowerCase() === normalized ||
-        u.email.trim().toLowerCase() === normalized
-    );
+    const account =
+      accounts.find(
+        (u) => Boolean(u.username?.trim()) && u.username!.trim().toLowerCase() === normalized
+      ) ??
+      accounts.find(
+        (u) => Boolean(u.matricule?.trim()) && u.matricule!.trim().toLowerCase() === normalized
+      ) ??
+      accounts.find(
+        (u) => Boolean(u.email?.trim()) && u.email!.trim().toLowerCase() === normalized
+      );
 
     if (!account || !account.passwordHash) {
-      return { error: 'Identifiant ou mot de passe incorrect.' };
+      return { error: 'Identifiant, matricule, e-mail ou mot de passe incorrect.' };
     }
 
     const valid = await verifyPassword(password, account.passwordHash);
@@ -621,7 +672,12 @@ export const storageService = {
   async createManagedUser(
     input: CreateUserInput,
     actor: AppUser
-  ): Promise<{ users: ManagedEmployee[]; created?: ManagedEmployee; error?: string }> {
+  ): Promise<{
+    users: ManagedEmployee[];
+    created?: ManagedEmployee;
+    provisionalPassword?: string;
+    error?: string;
+  }> {
     const accounts = this.getUsers();
 
     if (actor.role !== 'admin' && actor.role !== 'manager') {
@@ -639,40 +695,122 @@ export const storageService = {
     }
 
     const fullName = input.fullName.trim();
-    const email = input.email.trim().toLowerCase();
+    const cleanEmail = input.email?.trim().toLowerCase() ?? '';
 
     if (fullName.length < 2) {
       return { users: accounts, error: 'Le nom complet est obligatoire.' };
     }
-    if (!isValidEmail(email)) {
+
+    const existingIdentifiers = new Set(
+      accounts
+        .flatMap((u) => [u.username ?? '', u.matricule ?? ''])
+        .map((v) => v.trim().toLowerCase())
+        .filter(Boolean)
+    );
+
+    let finalUsername: string | undefined;
+    let finalMatricule: string | undefined;
+
+    if (input.role === 'admin') {
+      const cleanUsername = (input.username ?? '').trim();
+      if (cleanUsername.length < 2 || /\s/.test(cleanUsername)) {
+        return {
+          users: accounts,
+          error:
+            'L’identifiant de connexion administrateur est obligatoire (2 caractères minimum, sans espace).',
+        };
+      }
+      if (existingIdentifiers.has(cleanUsername.toLowerCase())) {
+        return {
+          users: accounts,
+          error: `L’identifiant "${cleanUsername}" est déjà utilisé par un autre compte.`,
+        };
+      }
+      finalUsername = cleanUsername;
+
+      const optionalMatricule = (input.matricule ?? '').trim();
+      if (optionalMatricule) {
+        if (optionalMatricule.length < 2 || /\s/.test(optionalMatricule)) {
+          return {
+            users: accounts,
+            error: 'Le matricule saisi doit contenir au moins 2 caractères sans espace.',
+          };
+        }
+        if (
+          optionalMatricule.toLowerCase() === cleanUsername.toLowerCase() ||
+          existingIdentifiers.has(optionalMatricule.toLowerCase())
+        ) {
+          return {
+            users: accounts,
+            error: `Le matricule "${optionalMatricule}" est déjà utilisé.`,
+          };
+        }
+        finalMatricule = optionalMatricule;
+      }
+    } else {
+      const cleanMatricule =
+        input.matricule !== undefined ? input.matricule.trim() : this.generateNextMatricule();
+      if (cleanMatricule.length < 2 || /\s/.test(cleanMatricule)) {
+        return {
+          users: accounts,
+          error: 'Le matricule est obligatoire (2 caractères minimum, sans espace).',
+        };
+      }
+      if (existingIdentifiers.has(cleanMatricule.toLowerCase())) {
+        return {
+          users: accounts,
+          error: `Le matricule "${cleanMatricule}" est déjà attribué à un autre compte.`,
+        };
+      }
+      finalMatricule = cleanMatricule;
+    }
+
+    if (cleanEmail && !isValidEmail(cleanEmail)) {
       return { users: accounts, error: 'Veuillez saisir une adresse e-mail valide.' };
     }
-    if (accounts.some((u) => u.email.trim().toLowerCase() === email)) {
+    if (
+      cleanEmail &&
+      accounts.some((u) => (u.email ?? '').trim().toLowerCase() === cleanEmail)
+    ) {
       return { users: accounts, error: 'Cette adresse e-mail est déjà utilisée.' };
     }
-    if (!input.password || input.password.length < 8) {
+
+    const rawPassword = input.password ?? '';
+    const hasCustomPassword = rawPassword.trim().length > 0;
+    if (input.role === 'admin' && !hasCustomPassword) {
       return {
         users: accounts,
-        error: 'Le mot de passe initial doit contenir au moins 8 caractères.',
+        error: 'Un mot de passe (8 caractères minimum) est obligatoire pour un compte administrateur.',
+      };
+    }
+    if (hasCustomPassword && rawPassword.length < 8) {
+      return {
+        users: accounts,
+        error: 'Le mot de passe personnalisé doit contenir au moins 8 caractères.',
       };
     }
 
-    const passwordHash = await hashPassword(input.password);
-    const matricule = this.generateNextMatricule();
+    const provisionalPassword =
+      !hasCustomPassword && finalMatricule
+        ? buildProvisionalPassword(finalMatricule)
+        : undefined;
+    const effectivePassword = hasCustomPassword ? rawPassword : provisionalPassword!;
+    const passwordHash = await hashPassword(effectivePassword);
     const todayYmd = toYmd(new Date(clockService.nowMs()));
 
     const created: ManagedEmployee = {
       id: generateUniqueId('usr'),
-      matricule,
+      username: finalUsername,
+      matricule: finalMatricule,
       fullName,
-      email,
+      email: cleanEmail || undefined,
       role: input.role,
       isPrimaryAdmin: false,
       passwordHash,
       jobTitle: input.jobTitle?.trim() || ROLE_LABELS[input.role],
       hireDate: todayYmd,
       accountStatus: 'actif',
-      site: input.site.trim() || 'Siège',
+      site: input.site.trim() || (input.role === 'admin' ? 'Direction' : 'Siège'),
       teamId: input.role === 'employee' || input.role === 'supervisor' ? input.teamId ?? '' : '',
       supervisorId: input.role === 'employee' ? input.supervisorId ?? '' : '',
       plannedStart: input.plannedStart ?? '08:30',
@@ -690,7 +828,7 @@ export const storageService = {
     const next = [created, ...accounts];
     safeWriteJson(STORAGE_KEYS.ACCOUNTS, next);
 
-    if (created.role === 'employee' || created.role === 'supervisor') {
+    if ((created.role === 'employee' || created.role === 'supervisor') && created.matricule) {
       const teamName = this.getTeams().find((t) => t.id === created.teamId)?.name ?? '';
       const schedules = this.getSchedules();
       safeWriteJson(STORAGE_KEYS.SCHEDULES, [
@@ -709,14 +847,161 @@ export const storageService = {
       ]);
     }
 
+    const displayId = created.username ?? created.matricule ?? '—';
     this.appendAuditLog(
       actor,
       `Compte créé · ${ROLE_LABELS[created.role]}`,
       '—',
-      `${created.fullName} (${created.matricule})`
+      `${created.fullName} (${displayId})`
     );
 
-    return { users: next, created };
+    return { users: next, created, provisionalPassword };
+  },
+
+  async importEmployeesFromExcel(
+    rows: Array<{ rowNumber: number; fullName: string; matricule: string }>,
+    actor: AppUser
+  ): Promise<ExcelImportExecutionResult> {
+    const accounts = this.getUsers();
+
+    if (actor.role !== 'admin' && actor.role !== 'manager') {
+      return {
+        users: accounts,
+        createdAccounts: [],
+        rejectedItems: [],
+        error: 'Votre rôle ne permet pas d’importer des comptes employés.',
+      };
+    }
+
+    const knownMatricules = new Set(
+      accounts
+        .flatMap((u) => [u.matricule ?? '', u.username ?? ''])
+        .map((v) => v.trim().toLowerCase())
+        .filter(Boolean)
+    );
+    const todayYmd = toYmd(new Date(clockService.nowMs()));
+
+    const newEmployees: ManagedEmployee[] = [];
+    const newSchedules: EmployeeScheduleConfig[] = [];
+    const createdAccounts: ExcelImportCreatedAccount[] = [];
+    const rejectedItems: ExcelImportExecutionResult['rejectedItems'] = [];
+
+    for (const row of rows) {
+      const cleanName = row.fullName.trim().replace(/\s+/g, ' ');
+      const cleanMatricule = row.matricule.trim();
+      const matriculeKey = cleanMatricule.toLowerCase();
+
+      if (cleanName.length < 2) {
+        rejectedItems.push({
+          rowNumber: row.rowNumber,
+          fullName: cleanName,
+          matricule: cleanMatricule,
+          reason: 'Nom complet invalide.',
+        });
+        continue;
+      }
+
+      if (cleanMatricule.length < 2 || /\s/.test(cleanMatricule)) {
+        rejectedItems.push({
+          rowNumber: row.rowNumber,
+          fullName: cleanName,
+          matricule: cleanMatricule,
+          reason: 'Matricule invalide.',
+        });
+        continue;
+      }
+
+      if (knownMatricules.has(matriculeKey)) {
+        rejectedItems.push({
+          rowNumber: row.rowNumber,
+          fullName: cleanName,
+          matricule: cleanMatricule,
+          reason: 'Matricule déjà existant dans OWTrackers (compte conservé).',
+        });
+        continue;
+      }
+
+      knownMatricules.add(matriculeKey);
+      const provisionalPassword = buildProvisionalPassword(cleanMatricule);
+      const passwordHash = await hashPassword(provisionalPassword);
+
+      const emp: ManagedEmployee = {
+        id: generateUniqueId('usr'),
+        matricule: cleanMatricule,
+        fullName: cleanName,
+        email: undefined,
+        role: 'employee',
+        isPrimaryAdmin: false,
+        passwordHash,
+        jobTitle: ROLE_LABELS.employee,
+        hireDate: todayYmd,
+        accountStatus: 'actif',
+        site: 'Siège',
+        teamId: '',
+        supervisorId: '',
+        plannedStart: '08:30',
+        plannedEnd: '17:00',
+        restDays: ['Samedi', 'Dimanche'],
+        dailyTargetDossiers: 35,
+        status: 'absent',
+        dossiersToday: 0,
+        presenceSecondsToday: 0,
+        productiveSecondsToday: 0,
+        pauseSecondsToday: 0,
+      };
+
+      newEmployees.push(emp);
+      newSchedules.push({
+        userId: emp.id,
+        employeeName: emp.fullName,
+        matricule: emp.matricule ?? '',
+        teamId: '',
+        teamName: '',
+        plannedStart: emp.plannedStart,
+        plannedEnd: emp.plannedEnd,
+        restDays: emp.restDays,
+        isCustom: false,
+      });
+      createdAccounts.push({
+        fullName: emp.fullName,
+        matricule: emp.matricule ?? '',
+        provisionalPassword,
+      });
+    }
+
+    if (newEmployees.length === 0) {
+      return {
+        users: accounts,
+        createdAccounts: [],
+        rejectedItems,
+      };
+    }
+
+    const updatedUsers = [...newEmployees, ...accounts];
+    safeWriteJson(STORAGE_KEYS.ACCOUNTS, updatedUsers);
+
+    const existingSchedules = this.getSchedules();
+    safeWriteJson(STORAGE_KEYS.SCHEDULES, [...existingSchedules, ...newSchedules]);
+
+    const previewMatricules = createdAccounts
+      .slice(0, 8)
+      .map((c) => c.matricule)
+      .join(', ');
+    const suffix = createdAccounts.length > 8 ? ` (+${createdAccounts.length - 8} autres)` : '';
+
+    this.appendAuditLog(
+      actor,
+      'Import Excel employés',
+      '—',
+      `${createdAccounts.length} employé(s) créé(s) : ${previewMatricules}${suffix}`,
+      `${rejectedItems.length} ligne(s) ignorée(s)`
+    );
+
+    return {
+      users: updatedUsers,
+      createdAccounts,
+      rejectedItems,
+    };
   },
 
   async updateManagedUser(
@@ -724,6 +1009,8 @@ export const storageService = {
     patch: Partial<
       Pick<
         ManagedEmployee,
+        | 'username'
+        | 'matricule'
         | 'fullName'
         | 'email'
         | 'role'
@@ -784,11 +1071,17 @@ export const storageService = {
       };
     }
 
-    const nextEmail = patch.email !== undefined ? patch.email.trim().toLowerCase() : existing.email;
-    if (!isValidEmail(nextEmail)) {
+    const nextEmail =
+      patch.email !== undefined
+        ? patch.email.trim().toLowerCase()
+        : (existing.email ?? '').trim().toLowerCase();
+    if (nextEmail && !isValidEmail(nextEmail)) {
       return { users: list, error: 'Veuillez saisir une adresse e-mail valide.' };
     }
-    if (list.some((u) => u.id !== userId && u.email.trim().toLowerCase() === nextEmail)) {
+    if (
+      nextEmail &&
+      list.some((u) => u.id !== userId && (u.email ?? '').trim().toLowerCase() === nextEmail)
+    ) {
       return { users: list, error: 'Cette adresse e-mail est déjà associée à un autre compte.' };
     }
 
@@ -806,14 +1099,55 @@ export const storageService = {
       nextPasswordHash = await hashPassword(options.newPassword);
     }
 
+    const nextRole = patch.role ?? existing.role;
+    const otherIdentifiers = new Set(
+      list
+        .filter((u) => u.id !== userId)
+        .flatMap((u) => [u.username ?? '', u.matricule ?? ''])
+        .map((v) => v.trim().toLowerCase())
+        .filter(Boolean)
+    );
+
+    // Conserver les identifiants déjà attribués; n'autoriser la saisie que s'ils manquent lors d'un changement de rôle
+    let finalUsername = existing.username;
+    if (nextRole === 'admin' && !finalUsername && patch.username?.trim()) {
+      const candidate = patch.username.trim();
+      if (candidate.length < 2 || /\s/.test(candidate)) {
+        return {
+          users: list,
+          error: 'L’identifiant administrateur doit contenir au moins 2 caractères sans espace.',
+        };
+      }
+      if (otherIdentifiers.has(candidate.toLowerCase())) {
+        return { users: list, error: `L’identifiant "${candidate}" est déjà utilisé.` };
+      }
+      finalUsername = candidate;
+    }
+
+    let finalMatricule = existing.matricule;
+    if (nextRole !== 'admin' && !finalMatricule) {
+      const candidate = patch.matricule?.trim() ?? '';
+      if (candidate.length < 2 || /\s/.test(candidate)) {
+        return {
+          users: list,
+          error: 'Un matricule valide est obligatoire pour ce rôle.',
+        };
+      }
+      if (otherIdentifiers.has(candidate.toLowerCase())) {
+        return { users: list, error: `Le matricule "${candidate}" est déjà utilisé.` };
+      }
+      finalMatricule = candidate;
+    }
+
     const updated: ManagedEmployee = {
       ...existing,
       ...patch,
       fullName: patch.fullName !== undefined ? patch.fullName.trim() : existing.fullName,
-      email: nextEmail,
+      email: nextEmail || undefined,
       passwordHash: nextPasswordHash,
       id: existing.id,
-      matricule: existing.matricule,
+      username: finalUsername,
+      matricule: finalMatricule,
       isPrimaryAdmin: existing.isPrimaryAdmin,
     };
 

@@ -56,9 +56,10 @@ export type NavModuleId =
 
 export interface AppUser {
   id: string;
-  matricule: string;
+  username?: string;
+  matricule?: string;
   fullName: string;
-  email: string;
+  email?: string;
   role: UserRole;
   isPrimaryAdmin?: boolean;
   jobTitle: string;
@@ -75,9 +76,10 @@ export interface AppUser {
 
 export interface ManagedEmployee {
   id: string;
-  matricule: string;
+  username?: string;
+  matricule?: string;
   fullName: string;
-  email: string;
+  email?: string;
   role: UserRole;
   isPrimaryAdmin?: boolean;
   passwordHash?: string;

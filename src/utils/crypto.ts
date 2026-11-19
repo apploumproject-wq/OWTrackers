@@ -120,3 +120,8 @@ export async function verifyPassword(password: string, storedHash: string): Prom
 export function isValidEmail(email: string): boolean {
   return /^[^\s@]+@[^\s@]+\.[^\s@]+$/.test(email.trim());
 }
+
+export function buildProvisionalPassword(matricule: string): string {
+  return `2026-OWT-${matricule.trim()}`;
+}
+

@@ -10,6 +10,7 @@ interface InitialAdminSetupScreenProps {
 }
 
 export function InitialAdminSetupScreen({ onInitialized }: InitialAdminSetupScreenProps) {
+  const [username, setUsername] = useState('');
   const [fullName, setFullName] = useState('');
   const [email, setEmail] = useState('');
   const [password, setPassword] = useState('');
@@ -23,11 +24,16 @@ export function InitialAdminSetupScreen({ onInitialized }: InitialAdminSetupScre
     e.preventDefault();
     setError(null);
 
+    const cleanUsername = username.trim();
+    if (cleanUsername.length < 2 || /\s/.test(cleanUsername)) {
+      setError('Veuillez saisir un identifiant de connexion valide (2 caractères minimum, sans espace).');
+      return;
+    }
     if (fullName.trim().length < 2) {
       setError('Veuillez saisir votre nom et prénom.');
       return;
     }
-    if (!isValidEmail(email)) {
+    if (email.trim() && !isValidEmail(email)) {
       setError('Veuillez saisir une adresse e-mail professionnelle valide.');
       return;
     }
@@ -43,6 +49,7 @@ export function InitialAdminSetupScreen({ onInitialized }: InitialAdminSetupScre
     setSubmitting(true);
     try {
       const result = await storageService.initializePrimaryAdmin({
+        username: cleanUsername,
         fullName,
         email,
         password,
@@ -84,19 +91,37 @@ export function InitialAdminSetupScreen({ onInitialized }: InitialAdminSetupScre
             </p>
           </div>
 
-          <div className="bg-slate-50 dark:bg-[#211E27] border border-slate-200 dark:border-[#393342] rounded-lg px-4 py-3 flex items-center justify-between text-xs">
+          <div className="bg-slate-50 dark:bg-[#211E27] border border-slate-200 dark:border-[#393342] rounded-lg px-4 py-3 flex items-center justify-between gap-3 text-xs">
             <div>
               <span className="text-slate-500 dark:text-[#C8C2D0]">Rôle attribué : </span>
               <span className="font-semibold text-[#7624A8] dark:text-[#D896FF]">
                 Administrateur principal
               </span>
             </div>
-            <div className="font-mono font-semibold text-slate-800 dark:text-white">
-              {storageService.generateNextMatricule()}
-            </div>
+            <span className="text-[11px] text-slate-500 dark:text-[#C8C2D0]">
+              Sans matricule employé
+            </span>
           </div>
 
           <form onSubmit={handleSubmit} className="space-y-4">
+            <div>
+              <label
+                htmlFor="init-username"
+                className="block text-xs font-medium text-slate-700 dark:text-[#C8C2D0] mb-1.5"
+              >
+                Identifiant de connexion <span className="text-red-600 dark:text-red-400">*</span>
+              </label>
+              <input
+                id="init-username"
+                type="text"
+                required
+                autoComplete="username"
+                value={username}
+                onChange={(e) => setUsername(e.target.value)}
+                placeholder="Ex. admin"
+                className="w-full px-3.5 py-2.5 text-sm font-mono bg-white dark:bg-[#211E27] text-slate-900 dark:text-white placeholder:text-slate-400 dark:placeholder:text-[#C8C2D0]/50 border border-slate-300 dark:border-[#393342] rounded-lg focus:outline-none focus:border-[#A83CE2]"
+              />
+            </div>
             <div>
               <label
                 htmlFor="init-fullname"
@@ -121,16 +146,15 @@ export function InitialAdminSetupScreen({ onInitialized }: InitialAdminSetupScre
                 htmlFor="init-email"
                 className="block text-xs font-medium text-slate-700 dark:text-[#C8C2D0] mb-1.5"
               >
-                Adresse e-mail <span className="text-red-600 dark:text-red-400">*</span>
+                Adresse e-mail (facultative)
               </label>
               <input
                 id="init-email"
                 type="email"
-                required
                 autoComplete="email"
                 value={email}
                 onChange={(e) => setEmail(e.target.value)}
-                placeholder="admin@entreprise.com"
+                placeholder="admin@entreprise.com (optionnel)"
                 className="w-full px-3.5 py-2.5 text-sm bg-white dark:bg-[#211E27] text-slate-900 dark:text-white placeholder:text-slate-400 dark:placeholder:text-[#C8C2D0]/50 border border-slate-300 dark:border-[#393342] rounded-lg focus:outline-none focus:border-[#A83CE2]"
               />
             </div>

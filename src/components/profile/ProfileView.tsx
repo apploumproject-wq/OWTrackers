@@ -50,7 +50,7 @@ export function ProfileView({
                 </p>
               </div>
               <span className="font-mono text-xs font-semibold text-[#7624A8] dark:text-[#D896FF]">
-                {user.matricule}
+                {user.username || user.matricule || '—'}
               </span>
             </div>
 
@@ -62,9 +62,25 @@ export function ProfileView({
                 </dd>
               </div>
               <div>
-                <dt className="text-xs text-slate-500 dark:text-[#C8C2D0]">Identifiant</dt>
+                <dt className="text-xs text-slate-500 dark:text-[#C8C2D0]">
+                  {user.role === 'admin' ? 'Identifiant de connexion' : 'Identifiant (Matricule)'}
+                </dt>
+                <dd className="font-mono text-xs font-semibold text-slate-900 dark:text-white mt-1">
+                  {user.username || user.matricule || '—'}
+                </dd>
+              </div>
+              {user.role === 'admin' && user.matricule && (
+                <div>
+                  <dt className="text-xs text-slate-500 dark:text-[#C8C2D0]">Matricule</dt>
+                  <dd className="font-mono text-xs text-slate-800 dark:text-white mt-1">
+                    {user.matricule}
+                  </dd>
+                </div>
+              )}
+              <div>
+                <dt className="text-xs text-slate-500 dark:text-[#C8C2D0]">Adresse e-mail</dt>
                 <dd className="font-mono text-xs text-slate-800 dark:text-white mt-1 break-all">
-                  {user.email}
+                  {user.email ? user.email : 'Non renseignée'}
                 </dd>
               </div>
               <div>

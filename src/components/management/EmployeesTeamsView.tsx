@@ -1,14 +1,19 @@
-import React, { useMemo, useState } from 'react';
+import React, { useMemo, useRef, useState } from 'react';
 import {
+  AlertTriangle,
+  Archive,
   Check,
+  CheckCircle2,
+  Copy,
   Edit3,
   Eye,
   EyeOff,
+  FileSpreadsheet,
   Plus,
   Search,
+  Upload,
   UserCheck,
   UserMinus,
-  Archive,
   X,
 } from 'lucide-react';
 import {
@@ -23,8 +28,13 @@ import {
   UserRole,
 } from '../../core/types';
 import { ROLE_LABELS } from '../../core/permissions';
-import { CreateUserInput, storageService } from '../../services/storageService';
-import { isValidEmail } from '../../utils/crypto';
+import {
+  CreateUserInput,
+  ExcelImportExecutionResult,
+  storageService,
+} from '../../services/storageService';
+import { buildProvisionalPassword, isValidEmail } from '../../utils/crypto';
+import { analyzeEmployeeExcelBuffer, ExcelImportPreview } from '../../utils/excelImport';
 import {
   formatDateFr,
   formatDateTimeFr,
@@ -46,12 +56,21 @@ interface EmployeesTeamsViewProps {
   companies: CompanyRecord[];
   correctionRequests: CorrectionRequest[];
   qualityControls: QualityControlRecord[];
-  onCreateAccount: (input: CreateUserInput) => Promise<{ error?: string }>;
+  onCreateAccount: (input: CreateUserInput) => Promise<{
+    error?: string;
+    createdMatricule?: string;
+    provisionalPassword?: string;
+  }>;
+  onImportEmployeesExcel: (
+    rows: Array<{ rowNumber: number; fullName: string; matricule: string }>
+  ) => Promise<ExcelImportExecutionResult>;
   onUpdateAccount: (
     userId: string,
     patch: Partial<
       Pick<
         ManagedEmployee,
+        | 'username'
+        | 'matricule'
         | 'fullName'
         | 'email'
         | 'role'
@@ -85,7 +104,10 @@ const ACCOUNT_STATUS_LABELS: Record<AccountStatus, string> = {
 
 interface AccountFormState {
   id?: string;
-  matriculePreview: string;
+  username: string;
+  matricule: string;
+  hasExistingUsername?: boolean;
+  hasExistingMatricule?: boolean;
   isPrimaryAdmin?: boolean;
   fullName: string;
   email: string;
@@ -112,6 +134,7 @@ export function EmployeesTeamsView({
   correctionRequests,
   qualityControls,
   onCreateAccount,
+  onImportEmployeesExcel,
   onUpdateAccount,
   onSetAccountStatus,
   onSaveTeam,
@@ -123,12 +146,31 @@ export function EmployeesTeamsView({
   const [accountForm, setAccountForm] = useState<AccountFormState | null>(null);
   const [formError, setFormError] = useState<string | null>(null);
   const [bannerError, setBannerError] = useState<string | null>(null);
+  const [createdCredentialsBanner, setCreatedCredentialsBanner] = useState<{
+    fullName: string;
+    matricule: string;
+    provisionalPassword: string;
+  } | null>(null);
+  const [copiedId, setCopiedId] = useState<string | null>(null);
   const [submitting, setSubmitting] = useState(false);
   const [showPassword, setShowPassword] = useState(false);
   const [inspectedEmp, setInspectedEmp] = useState<ManagedEmployee | null>(null);
   const [editingTeam, setEditingTeam] = useState<(Omit<TeamRecord, 'id'> & { id?: string }) | null>(
     null
   );
+  const [excelModalOpen, setExcelModalOpen] = useState(false);
+  const [excelPreview, setExcelPreview] = useState<ExcelImportPreview | null>(null);
+  const [excelResult, setExcelResult] = useState<{
+    execution: ExcelImportExecutionResult;
+    ignoredFromPreview: Array<{
+      rowNumber: number;
+      fullName: string;
+      matricule: string;
+      reason: string;
+    }>;
+  } | null>(null);
+  const [importingExcel, setImportingExcel] = useState(false);
+  const excelInputRef = useRef<HTMLInputElement | null>(null);
 
   const isSupervisor = user.role === 'supervisor';
   const isAdmin = user.role === 'admin';
@@ -164,8 +206,9 @@ export function EmployeesTeamsView({
       if (!q) return true;
       return (
         e.fullName.toLowerCase().includes(q) ||
-        e.matricule.toLowerCase().includes(q) ||
-        e.email.toLowerCase().includes(q) ||
+        (e.username ?? '').toLowerCase().includes(q) ||
+        (e.matricule ?? '').toLowerCase().includes(q) ||
+        (e.email ?? '').toLowerCase().includes(q) ||
         e.site.toLowerCase().includes(q)
       );
     });
@@ -179,12 +222,23 @@ export function EmployeesTeamsView({
     });
   }, [correctionRequests, isSupervisor, user.teamId]);
 
+  const copyText = (text: string, key: string) => {
+    if (typeof navigator !== 'undefined' && navigator.clipboard?.writeText) {
+      void navigator.clipboard.writeText(text);
+      setCopiedId(key);
+      window.setTimeout(() => {
+        setCopiedId((cur) => (cur === key ? null : cur));
+      }, 2000);
+    }
+  };
+
   const openNewAccountForm = () => {
     const defaultTeam = teams[0];
     setFormError(null);
     setShowPassword(false);
     setAccountForm({
-      matriculePreview: storageService.generateNextMatricule(),
+      username: '',
+      matricule: storageService.generateNextMatricule(),
       fullName: '',
       email: '',
       role: 'employee',
@@ -207,10 +261,13 @@ export function EmployeesTeamsView({
     setShowPassword(false);
     setAccountForm({
       id: emp.id,
-      matriculePreview: emp.matricule,
+      username: emp.username ?? '',
+      matricule: emp.matricule ?? '',
+      hasExistingUsername: Boolean(emp.username?.trim()),
+      hasExistingMatricule: Boolean(emp.matricule?.trim()),
       isPrimaryAdmin: emp.isPrimaryAdmin,
       fullName: emp.fullName,
-      email: emp.email,
+      email: emp.email ?? '',
       role: emp.role,
       jobTitle: emp.jobTitle ?? '',
       site: emp.site,
@@ -235,27 +292,55 @@ export function EmployeesTeamsView({
       setFormError('Le nom complet est obligatoire.');
       return;
     }
-    if (!isValidEmail(accountForm.email)) {
+
+    const isAdminAccount = accountForm.role === 'admin';
+    const cleanUsername = accountForm.username.trim();
+    const cleanMatricule = accountForm.matricule.trim();
+
+    if (!accountForm.id) {
+      if (isAdminAccount) {
+        if (cleanUsername.length < 2 || /\s/.test(cleanUsername)) {
+          setFormError(
+            'L’identifiant de connexion administrateur est obligatoire (2 caractères minimum, sans espace).'
+          );
+          return;
+        }
+      } else if (cleanMatricule.length < 2 || /\s/.test(cleanMatricule)) {
+        setFormError('Le matricule est obligatoire (2 caractères minimum, sans espace).');
+        return;
+      }
+    }
+
+    if (accountForm.email.trim() && !isValidEmail(accountForm.email)) {
       setFormError('Veuillez saisir une adresse e-mail valide.');
       return;
     }
 
     if (!accountForm.id) {
-      if (accountForm.password.length < 8) {
-        setFormError('Le mot de passe initial doit contenir au moins 8 caractères.');
+      const hasCustomPassword = accountForm.password.trim().length > 0;
+      if (isAdminAccount && !hasCustomPassword) {
+        setFormError('Le mot de passe initial est obligatoire pour un compte administrateur.');
         return;
       }
-      if (accountForm.password !== accountForm.confirmPassword) {
-        setFormError('Les deux mots de passe ne correspondent pas.');
-        return;
+      if (hasCustomPassword) {
+        if (accountForm.password.length < 8) {
+          setFormError('Le mot de passe doit contenir au moins 8 caractères.');
+          return;
+        }
+        if (accountForm.password !== accountForm.confirmPassword) {
+          setFormError('Les deux mots de passe ne correspondent pas.');
+          return;
+        }
       }
 
       setSubmitting(true);
       try {
         const res = await onCreateAccount({
+          username: isAdminAccount ? cleanUsername : undefined,
+          matricule: isAdminAccount ? undefined : cleanMatricule,
           fullName: accountForm.fullName,
-          email: accountForm.email,
-          password: accountForm.password,
+          email: accountForm.email.trim() || undefined,
+          password: hasCustomPassword ? accountForm.password : undefined,
           role: accountForm.role,
           jobTitle: accountForm.jobTitle,
           site: accountForm.site,
@@ -269,6 +354,15 @@ export function EmployeesTeamsView({
         if (res.error) {
           setFormError(res.error);
           return;
+        }
+        if (res.provisionalPassword && res.createdMatricule) {
+          setCreatedCredentialsBanner({
+            fullName: accountForm.fullName.trim(),
+            matricule: res.createdMatricule,
+            provisionalPassword: res.provisionalPassword,
+          });
+        } else {
+          setCreatedCredentialsBanner(null);
         }
         setAccountForm(null);
       } finally {
@@ -294,12 +388,23 @@ export function EmployeesTeamsView({
       const res = await onUpdateAccount(
         accountForm.id,
         {
+          username:
+            isAdminAccount && !accountForm.hasExistingUsername && cleanUsername
+              ? cleanUsername
+              : undefined,
+          matricule:
+            !isAdminAccount && !accountForm.hasExistingMatricule && cleanMatricule
+              ? cleanMatricule
+              : undefined,
           fullName: accountForm.fullName,
-          email: accountForm.email,
+          email: accountForm.email.trim(),
           role: accountForm.role,
           jobTitle: accountForm.jobTitle,
           site: accountForm.site,
-          teamId: accountForm.role === 'employee' || accountForm.role === 'supervisor' ? accountForm.teamId : '',
+          teamId:
+            accountForm.role === 'employee' || accountForm.role === 'supervisor'
+              ? accountForm.teamId
+              : '',
           supervisorId: accountForm.role === 'employee' ? accountForm.supervisorId : '',
           plannedStart: accountForm.plannedStart,
           plannedEnd: accountForm.plannedEnd,
@@ -328,6 +433,87 @@ export function EmployeesTeamsView({
     const res = onSetAccountStatus(emp.id, nextStatus, reason);
     if (res && res.error) {
       setBannerError(res.error);
+    }
+  };
+
+  const openExcelModal = () => {
+    setExcelPreview(null);
+    setExcelResult(null);
+    setExcelModalOpen(true);
+  };
+
+  const closeExcelModal = () => {
+    if (importingExcel) return;
+    setExcelModalOpen(false);
+    setExcelPreview(null);
+    setExcelResult(null);
+    if (excelInputRef.current) {
+      excelInputRef.current.value = '';
+    }
+  };
+
+  const handleExcelFileSelected = async (e: React.ChangeEvent<HTMLInputElement>) => {
+    const file = e.target.files?.[0];
+    if (!file) return;
+    setExcelResult(null);
+    try {
+      const lowerName = file.name.toLowerCase();
+      if (!lowerName.endsWith('.xlsx')) {
+        setExcelPreview({
+          fileName: file.name,
+          totalRows: 0,
+          validRows: 0,
+          duplicateRows: 0,
+          invalidRows: 0,
+          rows: [],
+          error: 'Format non pris en charge. Veuillez sélectionner un fichier Excel (.xlsx).',
+        });
+        return;
+      }
+      const buffer = await file.arrayBuffer();
+      const preview = analyzeEmployeeExcelBuffer(buffer, file.name, employees);
+      setExcelPreview(preview);
+    } catch {
+      setExcelPreview({
+        fileName: file.name,
+        totalRows: 0,
+        validRows: 0,
+        duplicateRows: 0,
+        invalidRows: 0,
+        rows: [],
+        error: 'Erreur lors de la lecture du fichier sélectionné.',
+      });
+    } finally {
+      if (excelInputRef.current) {
+        excelInputRef.current.value = '';
+      }
+    }
+  };
+
+  const handleConfirmExcelImport = async () => {
+    if (!excelPreview || excelPreview.validRows === 0) return;
+    const validRows = excelPreview.rows
+      .filter((r) => r.status === 'valid')
+      .map((r) => ({
+        rowNumber: r.rowNumber,
+        fullName: r.fullName,
+        matricule: r.matricule,
+      }));
+    const ignoredFromPreview = excelPreview.rows
+      .filter((r) => r.status !== 'valid')
+      .map((r) => ({
+        rowNumber: r.rowNumber,
+        fullName: r.fullName,
+        matricule: r.matricule,
+        reason: r.reason ?? 'Ligne ignorée',
+      }));
+
+    setImportingExcel(true);
+    try {
+      const execution = await onImportEmployeesExcel(validRows);
+      setExcelResult({ execution, ignoredFromPreview });
+    } finally {
+      setImportingExcel(false);
     }
   };
 
@@ -702,17 +888,80 @@ export function EmployeesTeamsView({
         title="Utilisateurs & comptes"
         action={
           creatableRoles.length > 0 ? (
-            <button
-              type="button"
-              onClick={openNewAccountForm}
-              className="inline-flex items-center gap-2 px-4 py-2.5 bg-[#A83CE2] hover:bg-[#7624A8] text-white text-xs font-semibold rounded-lg cursor-pointer whitespace-nowrap"
-            >
-              <Plus className="w-4 h-4" aria-hidden="true" />
-              <span>Créer un compte</span>
-            </button>
+            <div className="flex flex-wrap items-center gap-2">
+              <button
+                type="button"
+                onClick={openExcelModal}
+                className="inline-flex items-center gap-2 px-4 py-2.5 bg-white dark:bg-[#292631] hover:bg-[#F7EEFC] dark:hover:bg-[#A83CE2]/15 text-[#7624A8] dark:text-[#D896FF] border border-[#A83CE2]/50 text-xs font-semibold rounded-lg cursor-pointer whitespace-nowrap transition-colors"
+              >
+                <FileSpreadsheet className="w-4 h-4" aria-hidden="true" />
+                <span>Importer depuis Excel (.xlsx)</span>
+              </button>
+              <button
+                type="button"
+                onClick={openNewAccountForm}
+                className="inline-flex items-center gap-2 px-4 py-2.5 bg-[#A83CE2] hover:bg-[#7624A8] text-white text-xs font-semibold rounded-lg cursor-pointer whitespace-nowrap"
+              >
+                <Plus className="w-4 h-4" aria-hidden="true" />
+                <span>Créer un compte</span>
+              </button>
+            </div>
           ) : undefined
         }
       />
+
+      {createdCredentialsBanner && (
+        <div className="bg-[#F7EEFC] dark:bg-[#292631] border border-[#A83CE2]/40 rounded-lg px-5 py-4 flex flex-col sm:flex-row sm:items-center sm:justify-between gap-4">
+          <div className="space-y-1 text-xs">
+            <div className="flex items-center gap-2 font-semibold text-[#7624A8] dark:text-[#D896FF]">
+              <CheckCircle2 className="w-4 h-4 shrink-0" aria-hidden="true" />
+              <span>
+                Compte créé pour {createdCredentialsBanner.fullName} — Mot de passe provisoire généré
+              </span>
+            </div>
+            <div className="text-slate-700 dark:text-[#C8C2D0] flex flex-wrap items-center gap-x-4 gap-y-1">
+              <span>
+                Matricule :{' '}
+                <strong className="font-mono text-slate-900 dark:text-white">
+                  {createdCredentialsBanner.matricule}
+                </strong>
+              </span>
+              <span>
+                Mot de passe provisoire :{' '}
+                <strong className="font-mono text-slate-900 dark:text-white bg-white dark:bg-[#211E27] px-2 py-0.5 rounded border border-slate-200 dark:border-[#393342]">
+                  {createdCredentialsBanner.provisionalPassword}
+                </strong>
+              </span>
+            </div>
+            <p className="text-[11px] text-slate-500 dark:text-[#C8C2D0]/80">
+              Communiquez ce mot de passe à l’employé. Pour des raisons de sécurité, il n’est pas conservé en clair.
+            </p>
+          </div>
+          <div className="flex items-center gap-2 shrink-0">
+            <button
+              type="button"
+              onClick={() =>
+                copyText(
+                  `Matricule : ${createdCredentialsBanner.matricule}\nMot de passe provisoire : ${createdCredentialsBanner.provisionalPassword}`,
+                  'created-banner'
+                )
+              }
+              className="inline-flex items-center gap-1.5 px-3 py-1.5 bg-[#A83CE2] hover:bg-[#7624A8] text-white text-xs font-semibold rounded-lg cursor-pointer"
+            >
+              <Copy className="w-3.5 h-3.5" aria-hidden="true" />
+              <span>{copiedId === 'created-banner' ? 'Copié' : 'Copier'}</span>
+            </button>
+            <button
+              type="button"
+              onClick={() => setCreatedCredentialsBanner(null)}
+              className="p-1.5 rounded-lg text-slate-500 dark:text-[#C8C2D0] hover:text-slate-900 dark:hover:text-white cursor-pointer"
+              aria-label="Fermer"
+            >
+              <X className="w-4 h-4" />
+            </button>
+          </div>
+        </div>
+      )}
 
       {bannerError && (
         <div className="text-xs text-red-700 dark:text-red-300 bg-red-50 dark:bg-red-950/40 border border-red-200 dark:border-red-800/60 rounded-lg px-4 py-3 flex items-center justify-between gap-3">
@@ -784,7 +1033,7 @@ export function EmployeesTeamsView({
             type="text"
             value={search}
             onChange={(e) => setSearch(e.target.value)}
-            placeholder="Nom, matricule, e-mail ou site..."
+            placeholder="Nom, identifiant, matricule, e-mail ou site..."
             className="w-full pl-9 pr-3 py-2 text-sm bg-white dark:bg-[#211E27] text-slate-900 dark:text-white placeholder:text-slate-400 dark:placeholder:text-[#C8C2D0]/60 border border-slate-300 dark:border-[#393342] rounded-lg focus:outline-none focus:border-[#A83CE2]"
           />
         </div>
@@ -871,7 +1120,8 @@ export function EmployeesTeamsView({
                           )}
                         </div>
                         <div className="text-xs font-mono text-slate-500 dark:text-[#C8C2D0]">
-                          {emp.matricule} · {emp.email}
+                          {emp.username || emp.matricule || '—'}
+                          {emp.email ? ` · ${emp.email}` : ''}
                         </div>
                       </td>
                       <td className="py-3 px-4 text-xs">
@@ -997,10 +1247,13 @@ export function EmployeesTeamsView({
                 <h3 className="text-base font-semibold text-slate-900 dark:text-white">
                   {accountForm.id ? 'Modifier le compte utilisateur' : 'Créer un compte utilisateur'}
                 </h3>
-                <div className="text-xs font-mono text-[#7624A8] dark:text-[#D896FF] mt-0.5">
-                  Matricule : {accountForm.matriculePreview}
-                  {!accountForm.id ? ' (attribué automatiquement)' : ''}
-                </div>
+                {accountForm.id && (
+                  <div className="text-xs font-mono text-[#7624A8] dark:text-[#D896FF] mt-0.5">
+                    {accountForm.role === 'admin'
+                      ? `Identifiant : ${accountForm.username || accountForm.matricule || '—'}`
+                      : `Matricule : ${accountForm.matricule || '—'}`}
+                  </div>
+                )}
               </div>
               <button
                 type="button"
@@ -1021,10 +1274,42 @@ export function EmployeesTeamsView({
                   required
                   value={accountForm.fullName}
                   onChange={(e) => setAccountForm({ ...accountForm, fullName: e.target.value })}
-                  placeholder="Ex. Jean Dupont"
+                  placeholder="Ex. Jean Rakoto"
                   className="w-full px-3 py-2 bg-white dark:bg-[#211E27] text-slate-900 dark:text-white border border-slate-300 dark:border-[#393342] rounded-lg focus:outline-none focus:border-[#A83CE2]"
                 />
               </div>
+
+              {accountForm.role === 'admin' ? (
+                <div>
+                  <label className="block font-medium text-slate-700 dark:text-[#C8C2D0] mb-1">
+                    Identifiant de connexion *
+                  </label>
+                  <input
+                    type="text"
+                    required
+                    disabled={Boolean(accountForm.id && accountForm.hasExistingUsername)}
+                    value={accountForm.username}
+                    onChange={(e) => setAccountForm({ ...accountForm, username: e.target.value })}
+                    placeholder="Ex. admin"
+                    className="w-full px-3 py-2 font-mono bg-white dark:bg-[#211E27] text-slate-900 dark:text-white border border-slate-300 dark:border-[#393342] rounded-lg focus:outline-none focus:border-[#A83CE2] disabled:opacity-60"
+                  />
+                </div>
+              ) : (
+                <div>
+                  <label className="block font-medium text-slate-700 dark:text-[#C8C2D0] mb-1">
+                    Matricule *
+                  </label>
+                  <input
+                    type="text"
+                    required
+                    disabled={Boolean(accountForm.id && accountForm.hasExistingMatricule)}
+                    value={accountForm.matricule}
+                    onChange={(e) => setAccountForm({ ...accountForm, matricule: e.target.value })}
+                    placeholder="Ex. OWT0001"
+                    className="w-full px-3 py-2 font-mono bg-white dark:bg-[#211E27] text-slate-900 dark:text-white border border-slate-300 dark:border-[#393342] rounded-lg focus:outline-none focus:border-[#A83CE2] disabled:opacity-60"
+                  />
+                </div>
+              )}
 
               <div>
                 <label className="block font-medium text-slate-700 dark:text-[#C8C2D0] mb-1">
@@ -1038,6 +1323,18 @@ export function EmployeesTeamsView({
                     setAccountForm({
                       ...accountForm,
                       role: nextRole,
+                      matricule:
+                        nextRole !== 'admin' && !accountForm.matricule.trim()
+                          ? storageService.generateNextMatricule()
+                          : accountForm.matricule,
+                      site:
+                        !accountForm.id && nextRole === 'admin' && accountForm.site === 'Siège'
+                          ? 'Direction'
+                          : !accountForm.id &&
+                            nextRole !== 'admin' &&
+                            accountForm.site === 'Direction'
+                          ? 'Siège'
+                          : accountForm.site,
                       dailyTargetDossiers:
                         nextRole === 'employee'
                           ? accountForm.dailyTargetDossiers || 35
@@ -1059,16 +1356,15 @@ export function EmployeesTeamsView({
                 </select>
               </div>
 
-              <div className="sm:col-span-2">
+              <div>
                 <label className="block font-medium text-slate-700 dark:text-[#C8C2D0] mb-1">
-                  Adresse e-mail *
+                  Adresse e-mail (facultative)
                 </label>
                 <input
                   type="email"
-                  required
                   value={accountForm.email}
                   onChange={(e) => setAccountForm({ ...accountForm, email: e.target.value })}
-                  placeholder="utilisateur@entreprise.com"
+                  placeholder="Optionnel"
                   className="w-full px-3 py-2 bg-white dark:bg-[#211E27] text-slate-900 dark:text-white border border-slate-300 dark:border-[#393342] rounded-lg focus:outline-none focus:border-[#A83CE2]"
                 />
               </div>
@@ -1220,17 +1516,29 @@ export function EmployeesTeamsView({
                     <label className="block font-medium text-slate-700 dark:text-[#C8C2D0] mb-1">
                       {accountForm.id
                         ? 'Nouveau mot de passe (optionnel)'
-                        : 'Mot de passe initial * (8 car. min.)'}
+                        : accountForm.role === 'admin'
+                        ? 'Mot de passe initial * (8 car. min.)'
+                        : 'Mot de passe personnalisé (facultatif)'}
                     </label>
                     <div className="relative">
                       <input
                         type={showPassword ? 'text' : 'password'}
-                        required={!accountForm.id}
-                        minLength={accountForm.id && !accountForm.password ? undefined : 8}
+                        required={!accountForm.id && accountForm.role === 'admin'}
+                        minLength={
+                          accountForm.password.trim() || (!accountForm.id && accountForm.role === 'admin')
+                            ? 8
+                            : undefined
+                        }
                         autoComplete="new-password"
                         value={accountForm.password}
                         onChange={(e) => setAccountForm({ ...accountForm, password: e.target.value })}
-                        placeholder={accountForm.id ? 'Laisser vide si inchangé' : ''}
+                        placeholder={
+                          accountForm.id
+                            ? 'Laisser vide si inchangé'
+                            : accountForm.role === 'admin'
+                            ? '8 caractères minimum'
+                            : 'Laisser vide pour mot de passe provisoire'
+                        }
                         className="w-full pl-3 pr-9 py-2 bg-white dark:bg-[#211E27] text-slate-900 dark:text-white border border-slate-300 dark:border-[#393342] rounded-lg focus:outline-none focus:border-[#A83CE2]"
                       />
                       <button
@@ -1242,18 +1550,38 @@ export function EmployeesTeamsView({
                         {showPassword ? <EyeOff className="w-3.5 h-3.5" /> : <Eye className="w-3.5 h-3.5" />}
                       </button>
                     </div>
+                    {!accountForm.id &&
+                      accountForm.role !== 'admin' &&
+                      !accountForm.password.trim() && (
+                        <p className="text-[11px] text-[#7624A8] dark:text-[#D896FF] mt-1 font-mono">
+                          Provisoire auto : {buildProvisionalPassword(accountForm.matricule || 'MATRICULE')}
+                        </p>
+                      )}
                   </div>
                   <div>
                     <label className="block font-medium text-slate-700 dark:text-[#C8C2D0] mb-1">
-                      Confirmation du mot de passe{!accountForm.id ? ' *' : ''}
+                      Confirmation du mot de passe
+                      {accountForm.password.trim().length > 0 ||
+                      (!accountForm.id && accountForm.role === 'admin')
+                        ? ' *'
+                        : ''}
                     </label>
                     <input
                       type={showPassword ? 'text' : 'password'}
-                      required={!accountForm.id || accountForm.password.length > 0}
+                      required={
+                        accountForm.password.trim().length > 0 ||
+                        (!accountForm.id && accountForm.role === 'admin')
+                      }
                       autoComplete="new-password"
                       value={accountForm.confirmPassword}
                       onChange={(e) =>
                         setAccountForm({ ...accountForm, confirmPassword: e.target.value })
+                      }
+                      placeholder={
+                        accountForm.password.trim().length > 0 ||
+                        (!accountForm.id && accountForm.role === 'admin')
+                          ? 'Confirmer le mot de passe'
+                          : 'Non requis si provisoire auto'
                       }
                       className="w-full px-3 py-2 bg-white dark:bg-[#211E27] text-slate-900 dark:text-white border border-slate-300 dark:border-[#393342] rounded-lg focus:outline-none focus:border-[#A83CE2]"
                     />
@@ -1303,7 +1631,8 @@ export function EmployeesTeamsView({
                   {inspectedEmp.fullName}
                 </h3>
                 <div className="text-xs text-slate-500 dark:text-[#C8C2D0] font-mono mt-0.5">
-                  {inspectedEmp.matricule} · {ROLE_LABELS[inspectedEmp.role]} · {inspectedEmp.site} ·{' '}
+                  {inspectedEmp.username || inspectedEmp.matricule || '—'} ·{' '}
+                  {ROLE_LABELS[inspectedEmp.role]} · {inspectedEmp.site} ·{' '}
                   {inspectedEmp.plannedStart}–{inspectedEmp.plannedEnd}
                 </div>
               </div>
@@ -1411,6 +1740,335 @@ export function EmployeesTeamsView({
                       <QualityControlStatusText status={q.status} />
                     </div>
                   ))}
+                </div>
+              </div>
+            )}
+          </div>
+        </div>
+      )}
+
+      {/* Modal Importation Excel (.xlsx) */}
+      {excelModalOpen && (
+        <div className="fixed inset-0 z-50 flex items-center justify-center p-4">
+          <div
+            className="fixed inset-0 bg-slate-900/50 dark:bg-black/70"
+            onClick={closeExcelModal}
+            aria-hidden="true"
+          />
+          <div className="relative bg-white dark:bg-[#292631] border border-slate-200 dark:border-[#393342] rounded-xl max-w-3xl w-full p-6 space-y-5 shadow-xl z-10 max-h-[90vh] overflow-y-auto">
+            <div className="flex items-start justify-between border-b border-slate-200 dark:border-[#393342] pb-4 gap-4">
+              <div>
+                <div className="inline-flex items-center gap-2 text-xs font-semibold text-[#7624A8] dark:text-[#D896FF]">
+                  <FileSpreadsheet className="w-4 h-4" aria-hidden="true" />
+                  <span>Importation Excel (.xlsx)</span>
+                </div>
+                <h3 className="text-lg font-bold text-slate-900 dark:text-white mt-0.5">
+                  {excelResult
+                    ? 'Bilan de l’importation'
+                    : excelPreview && !excelPreview.error
+                    ? 'Aperçu avant importation'
+                    : 'Importer des employés depuis Excel'}
+                </h3>
+              </div>
+              <button
+                type="button"
+                onClick={closeExcelModal}
+                disabled={importingExcel}
+                className="p-1.5 rounded-lg text-slate-400 dark:text-[#C8C2D0] hover:text-slate-700 dark:hover:text-white cursor-pointer disabled:opacity-50"
+                aria-label="Fermer"
+              >
+                <X className="w-4 h-4" />
+              </button>
+            </div>
+
+            {!excelResult && (
+              <div className="space-y-4">
+                <div className="bg-slate-50 dark:bg-[#211E27] border border-slate-200 dark:border-[#393342] rounded-lg p-4 flex flex-col sm:flex-row sm:items-center sm:justify-between gap-4">
+                  <div className="space-y-1 text-xs">
+                    <div className="font-semibold text-slate-900 dark:text-white">
+                      Colonnes obligatoires : <span className="font-mono text-[#7624A8] dark:text-[#D896FF]">Nom complet</span> et{' '}
+                      <span className="font-mono text-[#7624A8] dark:text-[#D896FF]">Matricule</span>
+                    </div>
+                    <p className="text-slate-600 dark:text-[#C8C2D0]">
+                      Les comptes importés reçoivent automatiquement le rôle Employé, sans e-mail, avec le mot de passe provisoire{' '}
+                      <span className="font-mono">2026-OWT-&#123;MATRICULE&#125;</span>. Les comptes déjà existants ne sont jamais modifiés.
+                    </p>
+                  </div>
+                  <div className="shrink-0">
+                    <input
+                      ref={excelInputRef}
+                      type="file"
+                      accept=".xlsx,application/vnd.openxmlformats-officedocument.spreadsheetml.sheet"
+                      onChange={handleExcelFileSelected}
+                      className="hidden"
+                      id="owt-excel-import-input"
+                    />
+                    <label
+                      htmlFor="owt-excel-import-input"
+                      className="inline-flex items-center gap-2 px-4 py-2 bg-[#A83CE2] hover:bg-[#7624A8] text-white text-xs font-semibold rounded-lg cursor-pointer whitespace-nowrap"
+                    >
+                      <Upload className="w-4 h-4" aria-hidden="true" />
+                      <span>{excelPreview ? 'Changer de fichier' : 'Choisir un fichier .xlsx'}</span>
+                    </label>
+                  </div>
+                </div>
+
+                {excelPreview?.error && (
+                  <div className="text-xs text-red-700 dark:text-red-300 bg-red-50 dark:bg-red-950/40 border border-red-200 dark:border-red-800/60 rounded-lg px-4 py-3 flex items-start gap-2.5">
+                    <AlertTriangle className="w-4 h-4 shrink-0 mt-0.5" aria-hidden="true" />
+                    <span>{excelPreview.error}</span>
+                  </div>
+                )}
+
+                {excelPreview && !excelPreview.error && (
+                  <div className="space-y-4">
+                    <div className="text-xs text-slate-600 dark:text-[#C8C2D0]">
+                      Fichier analysé :{' '}
+                      <span className="font-mono font-semibold text-slate-900 dark:text-white">
+                        {excelPreview.fileName}
+                      </span>
+                    </div>
+
+                    <div className="grid grid-cols-2 sm:grid-cols-4 gap-3 text-xs">
+                      <div className="p-3 bg-slate-50 dark:bg-[#211E27] rounded-lg border border-slate-200 dark:border-[#393342]">
+                        <div className="text-slate-500 dark:text-[#C8C2D0]">Total lignes</div>
+                        <div className="text-lg font-bold font-mono text-slate-900 dark:text-white mt-0.5">
+                          {excelPreview.totalRows}
+                        </div>
+                      </div>
+                      <div className="p-3 bg-emerald-50/70 dark:bg-emerald-950/20 rounded-lg border border-emerald-200 dark:border-emerald-800/50">
+                        <div className="text-emerald-800 dark:text-emerald-300">Lignes valides</div>
+                        <div className="text-lg font-bold font-mono text-emerald-700 dark:text-emerald-400 mt-0.5">
+                          {excelPreview.validRows}
+                        </div>
+                      </div>
+                      <div className="p-3 bg-amber-50/70 dark:bg-amber-950/20 rounded-lg border border-amber-200 dark:border-amber-800/50">
+                        <div className="text-amber-800 dark:text-amber-300">Doublons</div>
+                        <div className="text-lg font-bold font-mono text-amber-700 dark:text-amber-400 mt-0.5">
+                          {excelPreview.duplicateRows}
+                        </div>
+                      </div>
+                      <div className="p-3 bg-red-50/70 dark:bg-red-950/20 rounded-lg border border-red-200 dark:border-red-800/50">
+                        <div className="text-red-800 dark:text-red-300">Invalides</div>
+                        <div className="text-lg font-bold font-mono text-red-700 dark:text-red-400 mt-0.5">
+                          {excelPreview.invalidRows}
+                        </div>
+                      </div>
+                    </div>
+
+                    <div className="border border-slate-200 dark:border-[#393342] rounded-lg overflow-hidden max-h-72 overflow-y-auto">
+                      <table className="w-full text-left border-collapse text-xs">
+                        <thead className="sticky top-0 bg-slate-50 dark:bg-[#211E27] border-b border-slate-200 dark:border-[#393342] text-slate-500 dark:text-[#C8C2D0]">
+                          <tr>
+                            <th className="py-2.5 px-3">Ligne</th>
+                            <th className="py-2.5 px-3">Nom complet</th>
+                            <th className="py-2.5 px-3">Matricule</th>
+                            <th className="py-2.5 px-3">Statut</th>
+                            <th className="py-2.5 px-3">Détail / Motif de rejet</th>
+                          </tr>
+                        </thead>
+                        <tbody className="divide-y divide-slate-100 dark:divide-[#393342]">
+                          {excelPreview.rows.map((row) => (
+                            <tr key={`${row.rowNumber}-${row.matricule}`} className="bg-white dark:bg-[#292631]">
+                              <td className="py-2 px-3 font-mono text-slate-500 dark:text-[#C8C2D0]">
+                                #{row.rowNumber}
+                              </td>
+                              <td className="py-2 px-3 font-medium text-slate-900 dark:text-white">
+                                {row.fullName || '—'}
+                              </td>
+                              <td className="py-2 px-3 font-mono text-slate-800 dark:text-white">
+                                {row.matricule || '—'}
+                              </td>
+                              <td className="py-2 px-3 whitespace-nowrap">
+                                {row.status === 'valid' ? (
+                                  <span className="font-semibold text-emerald-700 dark:text-emerald-400">
+                                    Valide
+                                  </span>
+                                ) : row.status === 'duplicate' ? (
+                                  <span className="font-semibold text-amber-700 dark:text-amber-400">
+                                    Doublon
+                                  </span>
+                                ) : (
+                                  <span className="font-semibold text-red-700 dark:text-red-400">
+                                    Invalide
+                                  </span>
+                                )}
+                              </td>
+                              <td className="py-2 px-3 text-slate-600 dark:text-[#C8C2D0]">
+                                {row.reason ?? 'Prêt pour création (Employé)'}
+                              </td>
+                            </tr>
+                          ))}
+                        </tbody>
+                      </table>
+                    </div>
+
+                    <div className="flex flex-col sm:flex-row sm:items-center sm:justify-end gap-2 pt-2">
+                      <button
+                        type="button"
+                        onClick={closeExcelModal}
+                        disabled={importingExcel}
+                        className="px-4 py-2 text-xs font-semibold text-slate-600 dark:text-[#C8C2D0] hover:bg-slate-100 dark:hover:bg-[#211E27] rounded-lg cursor-pointer"
+                      >
+                        Annuler
+                      </button>
+                      <button
+                        type="button"
+                        onClick={handleConfirmExcelImport}
+                        disabled={excelPreview.validRows === 0 || importingExcel}
+                        className="inline-flex items-center justify-center gap-2 px-5 py-2 bg-[#A83CE2] hover:bg-[#7624A8] disabled:opacity-50 text-white text-xs font-semibold rounded-lg cursor-pointer"
+                      >
+                        <Check className="w-4 h-4" aria-hidden="true" />
+                        <span>
+                          {importingExcel
+                            ? 'Importation en cours...'
+                            : `Confirmer l’importation (${excelPreview.validRows} compte${
+                                excelPreview.validRows > 1 ? 's' : ''
+                              })`}
+                        </span>
+                      </button>
+                    </div>
+                  </div>
+                )}
+              </div>
+            )}
+
+            {excelResult && (
+              <div className="space-y-4">
+                {excelResult.execution.error && (
+                  <div className="text-xs text-red-700 dark:text-red-300 bg-red-50 dark:bg-red-950/40 border border-red-200 dark:border-red-800/60 rounded-lg px-4 py-3">
+                    {excelResult.execution.error}
+                  </div>
+                )}
+
+                <div className="grid grid-cols-1 sm:grid-cols-2 gap-3 text-xs">
+                  <div className="p-3.5 bg-emerald-50/70 dark:bg-emerald-950/20 rounded-lg border border-emerald-200 dark:border-emerald-800/50">
+                    <div className="text-emerald-800 dark:text-emerald-300">Comptes créés</div>
+                    <div className="text-xl font-bold font-mono text-emerald-700 dark:text-emerald-400 mt-0.5">
+                      {excelResult.execution.createdAccounts.length}
+                    </div>
+                  </div>
+                  <div className="p-3.5 bg-slate-50 dark:bg-[#211E27] rounded-lg border border-slate-200 dark:border-[#393342]">
+                    <div className="text-slate-500 dark:text-[#C8C2D0]">Lignes ignorées</div>
+                    <div className="text-xl font-bold font-mono text-slate-900 dark:text-white mt-0.5">
+                      {excelResult.ignoredFromPreview.length +
+                        excelResult.execution.rejectedItems.length}
+                    </div>
+                  </div>
+                </div>
+
+                {excelResult.execution.createdAccounts.length > 0 && (
+                  <div className="space-y-2">
+                    <div className="flex flex-col sm:flex-row sm:items-center sm:justify-between gap-2">
+                      <div>
+                        <h4 className="text-xs font-semibold text-slate-900 dark:text-white">
+                          Comptes créés et mots de passe provisoires
+                        </h4>
+                        <p className="text-[11px] text-slate-500 dark:text-[#C8C2D0]">
+                          Ces mots de passe provisoires sont affichés uniquement ici pour transmission aux employés ; seul leur hash est stocké.
+                        </p>
+                      </div>
+                      <button
+                        type="button"
+                        onClick={() =>
+                          copyText(
+                            excelResult.execution.createdAccounts
+                              .map(
+                                (acc) =>
+                                  `${acc.matricule}\t${acc.fullName}\t${acc.provisionalPassword}`
+                              )
+                              .join('\n'),
+                            'excel-all'
+                          )
+                        }
+                        className="inline-flex items-center gap-1.5 px-3 py-1.5 bg-[#F7EEFC] dark:bg-[#A83CE2]/20 hover:bg-[#A83CE2] hover:text-white text-[#7624A8] dark:text-[#D896FF] text-xs font-semibold rounded-lg cursor-pointer transition-colors shrink-0"
+                      >
+                        <Copy className="w-3.5 h-3.5" aria-hidden="true" />
+                        <span>{copiedId === 'excel-all' ? 'Liste copiée' : 'Copier tout'}</span>
+                      </button>
+                    </div>
+
+                    <div className="border border-slate-200 dark:border-[#393342] rounded-lg overflow-hidden max-h-64 overflow-y-auto">
+                      <table className="w-full text-left border-collapse text-xs">
+                        <thead className="sticky top-0 bg-slate-50 dark:bg-[#211E27] border-b border-slate-200 dark:border-[#393342] text-slate-500 dark:text-[#C8C2D0]">
+                          <tr>
+                            <th className="py-2.5 px-3">Matricule</th>
+                            <th className="py-2.5 px-3">Nom complet</th>
+                            <th className="py-2.5 px-3">Mot de passe provisoire</th>
+                            <th className="py-2.5 px-3 text-right">Action</th>
+                          </tr>
+                        </thead>
+                        <tbody className="divide-y divide-slate-100 dark:divide-[#393342]">
+                          {excelResult.execution.createdAccounts.map((acc) => (
+                            <tr key={acc.matricule} className="bg-white dark:bg-[#292631]">
+                              <td className="py-2 px-3 font-mono font-semibold text-[#7624A8] dark:text-[#D896FF]">
+                                {acc.matricule}
+                              </td>
+                              <td className="py-2 px-3 font-medium text-slate-900 dark:text-white">
+                                {acc.fullName}
+                              </td>
+                              <td className="py-2 px-3 font-mono text-slate-900 dark:text-white">
+                                {acc.provisionalPassword}
+                              </td>
+                              <td className="py-2 px-3 text-right">
+                                <button
+                                  type="button"
+                                  onClick={() =>
+                                    copyText(acc.provisionalPassword, `pw-${acc.matricule}`)
+                                  }
+                                  className="inline-flex items-center gap-1 px-2.5 py-1 rounded bg-slate-100 dark:bg-[#211E27] text-slate-700 dark:text-[#C8C2D0] hover:text-[#7624A8] dark:hover:text-white cursor-pointer"
+                                >
+                                  <Copy className="w-3 h-3" aria-hidden="true" />
+                                  <span>
+                                    {copiedId === `pw-${acc.matricule}` ? 'Copié' : 'Copier'}
+                                  </span>
+                                </button>
+                              </td>
+                            </tr>
+                          ))}
+                        </tbody>
+                      </table>
+                    </div>
+                  </div>
+                )}
+
+                {(excelResult.ignoredFromPreview.length > 0 ||
+                  excelResult.execution.rejectedItems.length > 0) && (
+                  <div className="space-y-1.5">
+                    <h4 className="text-xs font-semibold text-slate-700 dark:text-[#C8C2D0]">
+                      Lignes ignorées ({excelResult.ignoredFromPreview.length + excelResult.execution.rejectedItems.length})
+                    </h4>
+                    <div className="border border-slate-200 dark:border-[#393342] rounded-lg divide-y divide-slate-100 dark:divide-[#393342] max-h-40 overflow-y-auto text-xs">
+                      {[...excelResult.ignoredFromPreview, ...excelResult.execution.rejectedItems].map(
+                        (item, idx) => (
+                          <div
+                            key={`${item.rowNumber}-${item.matricule}-${idx}`}
+                            className="px-3 py-2 flex items-center justify-between gap-3 bg-white dark:bg-[#292631]"
+                          >
+                            <span className="text-slate-700 dark:text-white">
+                              <span className="font-mono text-slate-400 mr-1.5">
+                                #{item.rowNumber}
+                              </span>
+                              {item.fullName || '—'} ({item.matricule || '—'})
+                            </span>
+                            <span className="text-amber-700 dark:text-amber-400 text-right">
+                              {item.reason}
+                            </span>
+                          </div>
+                        )
+                      )}
+                    </div>
+                  </div>
+                )}
+
+                <div className="flex justify-end pt-2">
+                  <button
+                    type="button"
+                    onClick={closeExcelModal}
+                    className="px-5 py-2 bg-[#A83CE2] hover:bg-[#7624A8] text-white text-xs font-semibold rounded-lg cursor-pointer"
+                  >
+                    Fermer
+                  </button>
                 </div>
               </div>
             )}
