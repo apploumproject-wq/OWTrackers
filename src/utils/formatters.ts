@@ -104,6 +104,95 @@ export function isSameDayYmd(isoOrYmd: string, targetYmd: string): boolean {
   return toYmd(d) === targetYmd;
 }
 
+export function isValidYmd(ymd: string): boolean {
+  if (!/^\d{4}-\d{2}-\d{2}$/.test(ymd)) return false;
+  const [y, m, d] = ymd.split('-').map(Number);
+  const dt = new Date(y, m - 1, d, 12, 0, 0, 0);
+  return dt.getFullYear() === y && dt.getMonth() === m - 1 && dt.getDate() === d;
+}
+
+export function isValidHHmm(hhmm: string): boolean {
+  if (!/^\d{2}:\d{2}$/.test(hhmm)) return false;
+  const [h, m] = hhmm.split(':').map(Number);
+  return h >= 0 && h <= 23 && m >= 0 && m <= 59;
+}
+
+export function parseYmdLocal(ymd: string): Date {
+  const [y, m, d] = ymd.split('-').map(Number);
+  return new Date(y, m - 1, d, 12, 0, 0, 0);
+}
+
+export function addDaysYmd(ymd: string, days: number): string {
+  const dt = parseYmdLocal(ymd);
+  dt.setDate(dt.getDate() + days);
+  return toYmd(dt);
+}
+
+export function getMondayOfWeekYmd(ymdOrDate: string | Date): string {
+  const dt =
+    typeof ymdOrDate === 'string'
+      ? parseYmdLocal(ymdOrDate)
+      : new Date(
+          ymdOrDate.getFullYear(),
+          ymdOrDate.getMonth(),
+          ymdOrDate.getDate(),
+          12,
+          0,
+          0,
+          0
+        );
+  const day = dt.getDay(); // 0=Dimanche .. 6=Samedi
+  const diffToMonday = day === 0 ? -6 : 1 - day;
+  dt.setDate(dt.getDate() + diffToMonday);
+  return toYmd(dt);
+}
+
+const WEEKDAY_LABELS_FR = ['Lundi', 'Mardi', 'Mercredi', 'Jeudi', 'Vendredi'] as const;
+
+export function getWeekDaysYmd(
+  weekStartYmd: string
+): Array<{ dateYmd: string; dayLabel: string; shortDate: string }> {
+  const monday = getMondayOfWeekYmd(weekStartYmd);
+  return WEEKDAY_LABELS_FR.map((dayLabel, idx) => {
+    const dateYmd = addDaysYmd(monday, idx);
+    const [, m, d] = dateYmd.split('-');
+    return {
+      dateYmd,
+      dayLabel,
+      shortDate: `${d}/${m}`,
+    };
+  });
+}
+
+export function formatYmdFr(ymd: string): string {
+  if (!isValidYmd(ymd)) return ymd;
+  const [y, m, d] = ymd.split('-');
+  return `${d}/${m}/${y}`;
+}
+
+export function formatYmdLongFr(ymd: string): string {
+  if (!isValidYmd(ymd)) return ymd;
+  return parseYmdLocal(ymd).toLocaleDateString('fr-FR', {
+    weekday: 'short',
+    day: '2-digit',
+    month: 'short',
+    year: 'numeric',
+  });
+}
+
+export function enumerateYmdRange(startYmd: string, endYmd: string, maxDays = 370): string[] {
+  if (!isValidYmd(startYmd) || !isValidYmd(endYmd) || endYmd < startYmd) return [];
+  const result: string[] = [];
+  let cursor = startYmd;
+  let count = 0;
+  while (cursor <= endYmd && count < maxDays) {
+    result.push(cursor);
+    cursor = addDaysYmd(cursor, 1);
+    count += 1;
+  }
+  return result;
+}
+
 export function isWithinDays(isoOrYmd: string, referenceDate: Date, days: number): boolean {
   const d = new Date(isoOrYmd);
   if (Number.isNaN(d.getTime())) return false;

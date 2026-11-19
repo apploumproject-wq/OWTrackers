@@ -5,6 +5,7 @@ import {
   CorrectionRequest,
   AppUser,
   ManagedEmployee,
+  MyValidatedLeaveItem,
   NavModuleId,
   OutingAuthorizationRequest,
   QualityControlRecord,
@@ -18,6 +19,7 @@ import {
   ServiceStatusDisplay,
   StatTile,
 } from '../ui/DataPrimitives';
+import { MyLeavesSection } from '../common/MyLeavesSection';
 
 interface ManagementDashboardProps {
   user: AppUser;
@@ -27,6 +29,7 @@ interface ManagementDashboardProps {
   qualityControls: QualityControlRecord[];
   outingRequests: OutingAuthorizationRequest[];
   correctionRequests: CorrectionRequest[];
+  myLeaves: MyValidatedLeaveItem[];
   onReviewOutingRequest: (requestId: string, decision: 'approuvee' | 'refusee') => void;
   onNavigate: (moduleId: NavModuleId) => void;
 }
@@ -39,6 +42,7 @@ export function ManagementDashboard({
   qualityControls,
   outingRequests,
   correctionRequests,
+  myLeaves,
   onReviewOutingRequest,
   onNavigate,
 }: ManagementDashboardProps) {
@@ -442,6 +446,8 @@ export function ManagementDashboard({
           </table>
         </div>
       </section>
+
+      <MyLeavesSection leaves={myLeaves} />
     </div>
   );
 }

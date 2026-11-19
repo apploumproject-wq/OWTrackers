@@ -11,6 +11,8 @@ import {
   Building2,
   ClipboardList,
   CalendarClock,
+  CalendarCheck2,
+  CalendarDays,
   ShieldCheck,
   Target,
   FileSpreadsheet,
@@ -28,6 +30,7 @@ import { BrandLogo } from '../ui/DataPrimitives';
 interface AppShellProps {
   currentUser: AppUser;
   supervisorPermissions: Permission[];
+  canAccessPlanning: boolean;
   activeModule: NavModuleId;
   onSelectModule: (moduleId: NavModuleId) => void;
   onLogout: () => void;
@@ -47,6 +50,8 @@ const MODULE_ICONS: Record<NavModuleId, React.ComponentType<{ className?: string
   mgmt_clients: Building2,
   mgmt_tasks: ClipboardList,
   mgmt_schedules: CalendarClock,
+  mgmt_leaves: CalendarCheck2,
+  planning: CalendarDays,
   mgmt_quality: ShieldCheck,
   mgmt_objectives: Target,
   mgmt_reports: FileSpreadsheet,
@@ -56,6 +61,7 @@ const MODULE_ICONS: Record<NavModuleId, React.ComponentType<{ className?: string
 export function AppShell({
   currentUser,
   supervisorPermissions,
+  canAccessPlanning,
   activeModule,
   onSelectModule,
   onLogout,
@@ -64,7 +70,7 @@ export function AppShell({
   const [mobileMenuOpen, setMobileMenuOpen] = useState(false);
   const [aboutOpen, setAboutOpen] = useState(false);
 
-  const navItems = getNavItemsForRole(currentUser.role, supervisorPermissions);
+  const navItems = getNavItemsForRole(currentUser.role, supervisorPermissions, canAccessPlanning);
   const currentNavItem = navItems.find((n) => n.id === activeModule) ?? navItems[0];
 
   const principalItems = navItems.filter((i) => i.section === 'principal');

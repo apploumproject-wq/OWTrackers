@@ -13,6 +13,7 @@ import {
   AppUser,
   EmployeeScheduleConfig,
   EmployeeShiftState,
+  MyValidatedLeaveItem,
   NavModuleId,
   ServiceStatus,
 } from '../../core/types';
@@ -31,12 +32,14 @@ import {
   ServiceStatusDisplay,
   StatTile,
 } from '../ui/DataPrimitives';
+import { MyLeavesSection } from '../common/MyLeavesSection';
 
 interface EmployeeDashboardProps {
   user: AppUser;
   shiftState: EmployeeShiftState;
   schedule: EmployeeScheduleConfig | null;
   activities: ActivityRecord[];
+  myLeaves: MyValidatedLeaveItem[];
   nowMs: number;
   livePresenceSeconds: number;
   liveProductiveSeconds: number;
@@ -52,6 +55,7 @@ export function EmployeeDashboard({
   shiftState,
   schedule,
   activities,
+  myLeaves,
   nowMs,
   livePresenceSeconds,
   liveProductiveSeconds,
@@ -375,6 +379,8 @@ export function EmployeeDashboard({
           </div>
         )}
       </section>
+
+      <MyLeavesSection leaves={myLeaves} />
     </div>
   );
 }

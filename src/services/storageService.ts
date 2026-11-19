@@ -10,11 +10,18 @@ import {
   EmployeeScheduleConfig,
   EmployeeShiftState,
   GlobalAdminConfig,
+  LeaveActionTrace,
+  LeaveRecord,
   ManagedEmployee,
+  MyValidatedLeaveItem,
   OutingAuthorizationRequest,
   OutingReason,
   PauseSlot,
   Permission,
+  PlanningDisplayRow,
+  PlanningLeaveOverlay,
+  PlanningManualRow,
+  PlanningWeekData,
   ProductionObjective,
   QualityControlRecord,
   QualityCriterionConfig,
@@ -30,6 +37,7 @@ import {
 } from '../core/types';
 import {
   BASE_ROLE_PERMISSIONS,
+  hasPermission,
   OUTING_REASON_CONFIG,
   PAUSE_SLOT_LABELS,
   ROLE_LABELS,
@@ -51,8 +59,14 @@ import {
   verifyPassword,
 } from '../utils/crypto';
 import {
+  enumerateYmdRange,
+  formatYmdFr,
   generateUniqueId,
+  getMondayOfWeekYmd,
+  getWeekDaysYmd,
   isSameDayYmd,
+  isValidHHmm,
+  isValidYmd,
   toLocalDateTimeInputValue,
   toYmd,
 } from '../utils/formatters';
@@ -87,6 +101,11 @@ const STORAGE_KEYS = {
   QUALITY_CONTROLS: 'owtrackers_qc_records_v2',
   CORRECTION_REQUESTS: 'owtrackers_correction_requests_v2',
   AUDIT_LOGS: 'owtrackers_audit_logs_v2',
+  LEAVES: 'owtrackers_leaves_v1',
+  PLANNING_LEAVE_META: 'owtrackers_planning_leave_meta_v1',
+  PLANNING_MANUAL_ROWS: 'owtrackers_planning_manual_rows_v1',
+  PLANNING_DAY_ROW_COUNTS: 'owtrackers_planning_day_counts_v1',
+  PLANNING_ACCESS_USERS: 'owtrackers_planning_access_users_v1',
   THEME_USER_PREFIX: 'owtrackers_theme_user_v1_',
   LAST_THEME: 'owtrackers_last_theme_v1',
 };
@@ -1779,6 +1798,810 @@ export const storageService = {
       );
     }
     return next;
+  },
+
+  // --- Gestion des congés & Planning (avec contrôle strict des autorisations) ---
+  getPlanningAuthorizedUserIds(): string[] {
+    const existing = safeReadJson<string[]>(STORAGE_KEYS.PLANNING_ACCESS_USERS);
+    if (existing && Array.isArray(existing)) return existing;
+    safeWriteJson(STORAGE_KEYS.PLANNING_ACCESS_USERS, []);
+    return [];
+  },
+
+  canUserAccessPlanning(actorOrId: AppUser | string): boolean {
+    const actorId = typeof actorOrId === 'string' ? actorOrId : actorOrId.id;
+    const account = this.getUsers().find((u) => u.id === actorId);
+    if (!account || account.accountStatus !== 'actif') return false;
+    if (account.role === 'admin') return true;
+    return this.getPlanningAuthorizedUserIds().includes(account.id);
+  },
+
+  setUserPlanningAccess(
+    targetUserId: string,
+    authorized: boolean,
+    actor: AppUser
+  ): { authorizedUserIds: string[]; error?: string } {
+    const actorAccount = this.getUsers().find((u) => u.id === actor.id);
+    if (!actorAccount || actorAccount.accountStatus !== 'actif' || actorAccount.role !== 'admin') {
+      return {
+        authorizedUserIds: this.getPlanningAuthorizedUserIds(),
+        error: 'Seul un administrateur actif peut gérer les autorisations d’accès au Planning.',
+      };
+    }
+
+    const target = this.getUsers().find((u) => u.id === targetUserId);
+    if (!target) {
+      return {
+        authorizedUserIds: this.getPlanningAuthorizedUserIds(),
+        error: 'Utilisateur introuvable.',
+      };
+    }
+
+    if (target.role === 'admin') {
+      return {
+        authorizedUserIds: this.getPlanningAuthorizedUserIds(),
+        error: 'Les administrateurs disposent déjà d’un accès complet au Planning.',
+      };
+    }
+
+    const current = this.getPlanningAuthorizedUserIds();
+    const next = authorized
+      ? Array.from(new Set([...current, targetUserId]))
+      : current.filter((id) => id !== targetUserId);
+    safeWriteJson(STORAGE_KEYS.PLANNING_ACCESS_USERS, next);
+
+    const idLabel = target.matricule || target.username || target.id;
+    this.appendAuditLog(
+      actor,
+      `Accès Planning · ${target.fullName} (${idLabel})`,
+      current.includes(targetUserId) ? 'Autorisé' : 'Non autorisé',
+      authorized ? 'Autorisé' : 'Non autorisé'
+    );
+
+    return { authorizedUserIds: next };
+  },
+
+  canUserManageLeaves(actorOrId: AppUser | string): boolean {
+    const actorId = typeof actorOrId === 'string' ? actorOrId : actorOrId.id;
+    const account = this.getUsers().find((u) => u.id === actorId);
+    if (!account || account.accountStatus !== 'actif') return false;
+    if (account.role === 'admin' || account.role === 'manager') return true;
+    if (account.role === 'supervisor') {
+      return hasPermission('supervisor', 'manage:leaves', this.getSupervisorPermissions());
+    }
+    return false;
+  },
+
+  _isEmployeeInActorLeaveScope(
+    actorAccount: ManagedEmployee,
+    targetEmployee: ManagedEmployee,
+    accounts: ManagedEmployee[],
+    teams: TeamRecord[]
+  ): boolean {
+    if (actorAccount.role === 'admin' || actorAccount.role === 'manager') {
+      return targetEmployee.role !== 'admin' && Boolean(targetEmployee.matricule?.trim());
+    }
+    if (actorAccount.role === 'supervisor') {
+      if (targetEmployee.role !== 'employee') return false;
+      const supTeamIds = Array.from(
+        new Set(
+          [
+            actorAccount.teamId,
+            ...teams.filter((t) => t.supervisorId === actorAccount.id).map((t) => t.id),
+          ].filter(Boolean)
+        )
+      );
+      const hasExplicitScope =
+        supTeamIds.length > 0 || accounts.some((u) => u.supervisorId === actorAccount.id);
+      if (!hasExplicitScope) return true;
+      return (
+        supTeamIds.includes(targetEmployee.teamId) ||
+        targetEmployee.supervisorId === actorAccount.id
+      );
+    }
+    return false;
+  },
+
+  getManageableEmployeesForLeaves(actor: AppUser): ManagedEmployee[] {
+    const accounts = this.getUsers();
+    const actorAccount = accounts.find((u) => u.id === actor.id);
+    if (!actorAccount || actorAccount.accountStatus !== 'actif' || !this.canUserManageLeaves(actor)) {
+      return [];
+    }
+    const teams = this.getTeams();
+    const roleRank: Record<UserRole, number> = {
+      employee: 0,
+      supervisor: 1,
+      manager: 2,
+      admin: 3,
+    };
+    return accounts
+      .filter(
+        (emp) =>
+          emp.accountStatus === 'actif' &&
+          this._isEmployeeInActorLeaveScope(actorAccount, emp, accounts, teams)
+      )
+      .sort((a, b) => {
+        const rankDiff = roleRank[a.role] - roleRank[b.role];
+        if (rankDiff !== 0) return rankDiff;
+        return a.fullName.localeCompare(b.fullName, 'fr');
+      });
+  },
+
+  _readAllLeavesRaw(): LeaveRecord[] {
+    const existing = safeReadJson<LeaveRecord[]>(STORAGE_KEYS.LEAVES);
+    if (existing && Array.isArray(existing)) return existing;
+    safeWriteJson(STORAGE_KEYS.LEAVES, []);
+    return [];
+  },
+
+  getLeavesForManagement(actor: AppUser): { leaves: LeaveRecord[]; error?: string } {
+    const accounts = this.getUsers();
+    const actorAccount = accounts.find((u) => u.id === actor.id);
+    if (!actorAccount || actorAccount.accountStatus !== 'actif' || !this.canUserManageLeaves(actor)) {
+      return { leaves: [], error: 'Accès refusé au module Gestion des congés.' };
+    }
+    const all = this._readAllLeavesRaw();
+    const teams = this.getTeams();
+    const filtered =
+      actorAccount.role === 'supervisor'
+        ? all.filter((leave) => {
+            const emp = accounts.find((u) => u.id === leave.employeeId);
+            if (!emp) return false;
+            return this._isEmployeeInActorLeaveScope(actorAccount, emp, accounts, teams);
+          })
+        : all;
+
+    return {
+      leaves: [...filtered].sort((a, b) => b.validatedAt.localeCompare(a.validatedAt)),
+    };
+  },
+
+  createLeave(
+    input: {
+      employeeId: string;
+      startDate: string;
+      endDate: string;
+      startTime: string;
+      endTime: string;
+    },
+    actor: AppUser
+  ): { leaves: LeaveRecord[]; created?: LeaveRecord; error?: string } {
+    const accounts = this.getUsers();
+    const actorAccount = accounts.find((u) => u.id === actor.id);
+    const currentScoped = this.getLeavesForManagement(actor).leaves;
+
+    if (!actorAccount || actorAccount.accountStatus !== 'actif' || !this.canUserManageLeaves(actor)) {
+      return {
+        leaves: currentScoped,
+        error: 'Vous n’êtes pas autorisé à enregistrer ou valider des congés.',
+      };
+    }
+
+    const target = accounts.find((u) => u.id === input.employeeId);
+    if (!target || target.accountStatus !== 'actif') {
+      return {
+        leaves: currentScoped,
+        error: 'Veuillez sélectionner un employé actif valide.',
+      };
+    }
+
+    const teams = this.getTeams();
+    if (!this._isEmployeeInActorLeaveScope(actorAccount, target, accounts, teams)) {
+      return {
+        leaves: currentScoped,
+        error: 'Cet employé ne relève pas de votre périmètre de gestion des congés.',
+      };
+    }
+
+    const startDate = input.startDate.trim();
+    const endDate = input.endDate.trim();
+    const startTime = input.startTime.trim();
+    const endTime = input.endTime.trim();
+
+    if (!isValidYmd(startDate) || !isValidYmd(endDate)) {
+      return {
+        leaves: currentScoped,
+        error: 'Veuillez renseigner des dates de début et de fin valides.',
+      };
+    }
+    if (endDate < startDate) {
+      return {
+        leaves: currentScoped,
+        error: 'La date de fin doit être postérieure ou égale à la date de début.',
+      };
+    }
+    if (!isValidHHmm(startTime) || !isValidHHmm(endTime)) {
+      return {
+        leaves: currentScoped,
+        error: 'Veuillez renseigner des heures de début et de fin valides (HH:MM).',
+      };
+    }
+    if (endTime <= startTime) {
+      return {
+        leaves: currentScoped,
+        error: 'L’heure de fin doit être strictement postérieure à l’heure de début.',
+      };
+    }
+
+    const allLeaves = this._readAllLeavesRaw();
+    const hasConflict = allLeaves.some(
+      (existing) =>
+        existing.status === 'valide' &&
+        existing.employeeId === target.id &&
+        existing.startDate <= endDate &&
+        startDate <= existing.endDate &&
+        existing.startTime < endTime &&
+        startTime < existing.endTime
+    );
+    if (hasConflict) {
+      return {
+        leaves: currentScoped,
+        error: 'Un congé validé existe déjà pour cet employé sur ce créneau.',
+      };
+    }
+
+    const nowIso = clockService.nowIso();
+    const periodLabel =
+      startDate === endDate
+        ? `${formatYmdFr(startDate)} (${startTime}–${endTime})`
+        : `${formatYmdFr(startDate)} → ${formatYmdFr(endDate)} (${startTime}–${endTime})`;
+
+    const trace: LeaveActionTrace = {
+      id: generateUniqueId('lvt'),
+      action: 'validation',
+      actorId: actorAccount.id,
+      actorName: actorAccount.fullName,
+      actorRole: actorAccount.role,
+      timestamp: nowIso,
+      details: `Congé validé : ${periodLabel}`,
+    };
+
+    const created: LeaveRecord = {
+      id: generateUniqueId('lv'),
+      employeeId: target.id,
+      employeeNameSnapshot: target.fullName,
+      employeeMatriculeSnapshot: target.matricule ?? '',
+      startDate,
+      endDate,
+      startTime,
+      endTime,
+      status: 'valide',
+      createdById: actorAccount.id,
+      createdByName: actorAccount.fullName,
+      createdByRole: actorAccount.role,
+      validatedAt: nowIso,
+      history: [trace],
+    };
+
+    const nextAll = [created, ...allLeaves];
+    safeWriteJson(STORAGE_KEYS.LEAVES, nextAll);
+
+    this.appendAuditLog(
+      actor,
+      `Congé validé · ${target.fullName} (${target.matricule ?? '—'})`,
+      '—',
+      periodLabel
+    );
+
+    return {
+      leaves: this.getLeavesForManagement(actor).leaves,
+      created,
+    };
+  },
+
+  updateLeave(
+    leaveId: string,
+    patch: {
+      startDate: string;
+      endDate: string;
+      startTime: string;
+      endTime: string;
+    },
+    actor: AppUser
+  ): { leaves: LeaveRecord[]; updated?: LeaveRecord; error?: string } {
+    const accounts = this.getUsers();
+    const actorAccount = accounts.find((u) => u.id === actor.id);
+    const currentScoped = this.getLeavesForManagement(actor).leaves;
+
+    if (!actorAccount || actorAccount.accountStatus !== 'actif' || !this.canUserManageLeaves(actor)) {
+      return {
+        leaves: currentScoped,
+        error: 'Vous n’êtes pas autorisé à modifier des congés.',
+      };
+    }
+
+    const allLeaves = this._readAllLeavesRaw();
+    const existing = allLeaves.find((l) => l.id === leaveId);
+    if (!existing) {
+      return { leaves: currentScoped, error: 'Congé introuvable.' };
+    }
+    if (existing.status !== 'valide') {
+      return { leaves: currentScoped, error: 'Un congé annulé ne peut plus être modifié.' };
+    }
+
+    const target = accounts.find((u) => u.id === existing.employeeId);
+    const teams = this.getTeams();
+    if (
+      actorAccount.role === 'supervisor' &&
+      (!target || !this._isEmployeeInActorLeaveScope(actorAccount, target, accounts, teams))
+    ) {
+      return {
+        leaves: currentScoped,
+        error: 'Vous ne pouvez modifier que les congés des employés de votre périmètre.',
+      };
+    }
+
+    const startDate = patch.startDate.trim();
+    const endDate = patch.endDate.trim();
+    const startTime = patch.startTime.trim();
+    const endTime = patch.endTime.trim();
+
+    if (!isValidYmd(startDate) || !isValidYmd(endDate)) {
+      return {
+        leaves: currentScoped,
+        error: 'Veuillez renseigner des dates de début et de fin valides.',
+      };
+    }
+    if (endDate < startDate) {
+      return {
+        leaves: currentScoped,
+        error: 'La date de fin doit être postérieure ou égale à la date de début.',
+      };
+    }
+    if (!isValidHHmm(startTime) || !isValidHHmm(endTime)) {
+      return {
+        leaves: currentScoped,
+        error: 'Veuillez renseigner des heures de début et de fin valides (HH:MM).',
+      };
+    }
+    if (endTime <= startTime) {
+      return {
+        leaves: currentScoped,
+        error: 'L’heure de fin doit être strictement postérieure à l’heure de début.',
+      };
+    }
+
+    const hasConflict = allLeaves.some(
+      (other) =>
+        other.id !== existing.id &&
+        other.status === 'valide' &&
+        other.employeeId === existing.employeeId &&
+        other.startDate <= endDate &&
+        startDate <= other.endDate &&
+        other.startTime < endTime &&
+        startTime < other.endTime
+    );
+    if (hasConflict) {
+      return {
+        leaves: currentScoped,
+        error: 'Un autre congé validé existe déjà pour cet employé sur ce créneau.',
+      };
+    }
+
+    const nowIso = clockService.nowIso();
+    const prevLabel =
+      existing.startDate === existing.endDate
+        ? `${formatYmdFr(existing.startDate)} (${existing.startTime}–${existing.endTime})`
+        : `${formatYmdFr(existing.startDate)} → ${formatYmdFr(existing.endDate)} (${existing.startTime}–${existing.endTime})`;
+    const nextLabel =
+      startDate === endDate
+        ? `${formatYmdFr(startDate)} (${startTime}–${endTime})`
+        : `${formatYmdFr(startDate)} → ${formatYmdFr(endDate)} (${startTime}–${endTime})`;
+
+    const trace: LeaveActionTrace = {
+      id: generateUniqueId('lvt'),
+      action: 'modification',
+      actorId: actorAccount.id,
+      actorName: actorAccount.fullName,
+      actorRole: actorAccount.role,
+      timestamp: nowIso,
+      details: `${prevLabel} → ${nextLabel}`,
+    };
+
+    const updated: LeaveRecord = {
+      ...existing,
+      startDate,
+      endDate,
+      startTime,
+      endTime,
+      updatedById: actorAccount.id,
+      updatedByName: actorAccount.fullName,
+      updatedByRole: actorAccount.role,
+      updatedAt: nowIso,
+      history: [trace, ...(existing.history ?? [])],
+    };
+
+    const nextAll = allLeaves.map((l) => (l.id === leaveId ? updated : l));
+    safeWriteJson(STORAGE_KEYS.LEAVES, nextAll);
+
+    // Nettoyer les métadonnées Planning hors de la nouvelle plage de dates tout en conservant les jours maintenus
+    const overlays = this._readPlanningLeaveOverlays();
+    const cleanedOverlays = overlays.filter(
+      (ov) =>
+        ov.leaveId !== leaveId || (ov.dateYmd >= startDate && ov.dateYmd <= endDate)
+    );
+    if (cleanedOverlays.length !== overlays.length) {
+      safeWriteJson(STORAGE_KEYS.PLANNING_LEAVE_META, cleanedOverlays);
+    }
+
+    const empName = target?.fullName ?? existing.employeeNameSnapshot;
+    const empMatricule = target?.matricule ?? existing.employeeMatriculeSnapshot;
+    this.appendAuditLog(
+      actor,
+      `Congé modifié · ${empName} (${empMatricule || '—'})`,
+      prevLabel,
+      nextLabel
+    );
+
+    return {
+      leaves: this.getLeavesForManagement(actor).leaves,
+      updated,
+    };
+  },
+
+  cancelLeave(
+    leaveId: string,
+    actor: AppUser,
+    reason?: string
+  ): { leaves: LeaveRecord[]; error?: string } {
+    const accounts = this.getUsers();
+    const actorAccount = accounts.find((u) => u.id === actor.id);
+    const currentScoped = this.getLeavesForManagement(actor).leaves;
+
+    if (!actorAccount || actorAccount.accountStatus !== 'actif' || !this.canUserManageLeaves(actor)) {
+      return {
+        leaves: currentScoped,
+        error: 'Vous n’êtes pas autorisé à annuler des congés.',
+      };
+    }
+
+    const allLeaves = this._readAllLeavesRaw();
+    const existing = allLeaves.find((l) => l.id === leaveId);
+    if (!existing) {
+      return { leaves: currentScoped, error: 'Congé introuvable.' };
+    }
+    if (existing.status === 'annule') {
+      return { leaves: currentScoped, error: 'Ce congé est déjà annulé.' };
+    }
+
+    const target = accounts.find((u) => u.id === existing.employeeId);
+    const teams = this.getTeams();
+    if (
+      actorAccount.role === 'supervisor' &&
+      (!target || !this._isEmployeeInActorLeaveScope(actorAccount, target, accounts, teams))
+    ) {
+      return {
+        leaves: currentScoped,
+        error: 'Vous ne pouvez annuler que les congés des employés de votre périmètre.',
+      };
+    }
+
+    const nowIso = clockService.nowIso();
+    const periodLabel =
+      existing.startDate === existing.endDate
+        ? `${formatYmdFr(existing.startDate)} (${existing.startTime}–${existing.endTime})`
+        : `${formatYmdFr(existing.startDate)} → ${formatYmdFr(existing.endDate)} (${existing.startTime}–${existing.endTime})`;
+    const cleanReason = reason?.trim() || undefined;
+
+    const trace: LeaveActionTrace = {
+      id: generateUniqueId('lvt'),
+      action: 'annulation',
+      actorId: actorAccount.id,
+      actorName: actorAccount.fullName,
+      actorRole: actorAccount.role,
+      timestamp: nowIso,
+      details: cleanReason ? `Congé annulé (${cleanReason})` : 'Congé annulé',
+    };
+
+    const updated: LeaveRecord = {
+      ...existing,
+      status: 'annule',
+      cancelledById: actorAccount.id,
+      cancelledByName: actorAccount.fullName,
+      cancelledByRole: actorAccount.role,
+      cancelledAt: nowIso,
+      cancellationReason: cleanReason,
+      history: [trace, ...(existing.history ?? [])],
+    };
+
+    const nextAll = allLeaves.map((l) => (l.id === leaveId ? updated : l));
+    safeWriteJson(STORAGE_KEYS.LEAVES, nextAll);
+
+    const empName = target?.fullName ?? existing.employeeNameSnapshot;
+    const empMatricule = target?.matricule ?? existing.employeeMatriculeSnapshot;
+    this.appendAuditLog(
+      actor,
+      `Congé annulé · ${empName} (${empMatricule || '—'})`,
+      `Validé · ${periodLabel}`,
+      'Annulé',
+      cleanReason
+    );
+
+    return {
+      leaves: this.getLeavesForManagement(actor).leaves,
+    };
+  },
+
+  _readPlanningLeaveOverlays(): PlanningLeaveOverlay[] {
+    const existing = safeReadJson<PlanningLeaveOverlay[]>(STORAGE_KEYS.PLANNING_LEAVE_META);
+    if (existing && Array.isArray(existing)) return existing;
+    safeWriteJson(STORAGE_KEYS.PLANNING_LEAVE_META, []);
+    return [];
+  },
+
+  _readPlanningManualRows(): PlanningManualRow[] {
+    const existing = safeReadJson<PlanningManualRow[]>(STORAGE_KEYS.PLANNING_MANUAL_ROWS);
+    if (existing && Array.isArray(existing)) return existing;
+    safeWriteJson(STORAGE_KEYS.PLANNING_MANUAL_ROWS, []);
+    return [];
+  },
+
+  _readPlanningDayRowCounts(): Record<string, number> {
+    const existing = safeReadJson<Record<string, number>>(STORAGE_KEYS.PLANNING_DAY_ROW_COUNTS);
+    if (existing && typeof existing === 'object' && !Array.isArray(existing)) return existing;
+    safeWriteJson(STORAGE_KEYS.PLANNING_DAY_ROW_COUNTS, {});
+    return {};
+  },
+
+  getMyValidatedLeaves(userId: string): MyValidatedLeaveItem[] {
+    const allLeaves = this._readAllLeavesRaw();
+    const overlays = this._readPlanningLeaveOverlays();
+    return allLeaves
+      .filter((l) => l.employeeId === userId && l.status === 'valide')
+      .sort((a, b) => a.startDate.localeCompare(b.startDate))
+      .map((leave) => {
+        const dates = enumerateYmdRange(leave.startDate, leave.endDate);
+        const motifsSet = new Set<string>();
+        for (const d of dates) {
+          const ov = overlays.find((o) => o.leaveId === leave.id && o.dateYmd === d);
+          const clean = ov?.motif?.trim();
+          if (clean) motifsSet.add(clean);
+        }
+        return {
+          id: leave.id,
+          startDate: leave.startDate,
+          endDate: leave.endDate,
+          startTime: leave.startTime,
+          endTime: leave.endTime,
+          motifs: Array.from(motifsSet),
+        };
+      });
+  },
+
+  getPlanningWeekData(
+    weekStartYmdInput: string,
+    actor: AppUser
+  ): { data?: PlanningWeekData; error?: string } {
+    if (!this.canUserAccessPlanning(actor)) {
+      return {
+        error: 'Accès refusé : vous n’êtes pas autorisé à consulter le Planning.',
+      };
+    }
+
+    const weekStartYmd = getMondayOfWeekYmd(
+      isValidYmd(weekStartYmdInput) ? weekStartYmdInput : toYmd(new Date(clockService.nowMs()))
+    );
+    const weekDays = getWeekDaysYmd(weekStartYmd);
+    const weekEndYmd = weekDays[weekDays.length - 1].dateYmd;
+
+    const accounts = this.getUsers();
+    const validatedLeaves = this._readAllLeavesRaw().filter((l) => l.status === 'valide');
+    const overlays = this._readPlanningLeaveOverlays();
+    const manualRows = this._readPlanningManualRows();
+    const dayCounts = this._readPlanningDayRowCounts();
+
+    const days = weekDays.map((day) => {
+      const autoLeavesForDay = validatedLeaves
+        .filter((l) => l.startDate <= day.dateYmd && day.dateYmd <= l.endDate)
+        .map((l) => {
+          const emp = accounts.find((u) => u.id === l.employeeId);
+          const matricule = emp?.matricule?.trim() || l.employeeMatriculeSnapshot || '—';
+          const employeeName = emp?.fullName || l.employeeNameSnapshot || 'Collaborateur';
+          const ov = overlays.find((o) => o.leaveId === l.id && o.dateYmd === day.dateYmd);
+          const row: PlanningDisplayRow = {
+            rowKey: `leave:${l.id}:${day.dateYmd}`,
+            source: 'leave',
+            dateYmd: day.dateYmd,
+            leaveId: l.id,
+            matricule,
+            employeeName,
+            startTime: l.startTime,
+            endTime: l.endTime,
+            motif: ov?.motif ?? '',
+            remplacant: ov?.remplacant ?? '',
+          };
+          return row;
+        })
+        .sort((a, b) => {
+          const tDiff = a.startTime.localeCompare(b.startTime);
+          if (tDiff !== 0) return tDiff;
+          return a.employeeName.localeCompare(b.employeeName, 'fr');
+        });
+
+      const manualForDay = manualRows.filter((m) => m.dateYmd === day.dateYmd);
+      const highestSlot = manualForDay.reduce((max, r) => Math.max(max, r.slotIndex), -1);
+      const storedCount = dayCounts[day.dateYmd] ?? 10;
+      const manualRowCount = Math.max(10, storedCount, highestSlot + 1);
+
+      const manualDisplayRows: PlanningDisplayRow[] = Array.from(
+        { length: manualRowCount },
+        (_, slotIndex) => {
+          const existing = manualForDay.find((m) => m.slotIndex === slotIndex);
+          return {
+            rowKey: `manual:${day.dateYmd}:${slotIndex}`,
+            source: 'manual',
+            dateYmd: day.dateYmd,
+            slotIndex,
+            matricule: existing?.matricule ?? '',
+            employeeName: existing?.employeeName ?? '',
+            startTime: existing?.startTime ?? '',
+            endTime: existing?.endTime ?? '',
+            motif: existing?.motif ?? '',
+            remplacant: existing?.remplacant ?? '',
+          };
+        }
+      );
+
+      return {
+        dateYmd: day.dateYmd,
+        dayLabel: day.dayLabel,
+        shortDate: day.shortDate,
+        manualRowCount,
+        rows: [...autoLeavesForDay, ...manualDisplayRows],
+      };
+    });
+
+    return {
+      data: {
+        weekStartYmd,
+        weekEndYmd,
+        days,
+      },
+    };
+  },
+
+  updatePlanningLeaveOverlay(
+    leaveId: string,
+    dateYmd: string,
+    patch: { motif?: string; remplacant?: string },
+    actor: AppUser
+  ): { error?: string } {
+    if (!this.canUserAccessPlanning(actor)) {
+      return {
+        error: 'Accès refusé : vous n’êtes pas autorisé à modifier le Planning.',
+      };
+    }
+
+    const leave = this._readAllLeavesRaw().find((l) => l.id === leaveId);
+    if (!leave || leave.status !== 'valide') {
+      return { error: 'Ce congé validé est introuvable ou a été annulé.' };
+    }
+    if (!isValidYmd(dateYmd) || dateYmd < leave.startDate || dateYmd > leave.endDate) {
+      return { error: 'Date invalide pour ce congé.' };
+    }
+
+    const overlays = this._readPlanningLeaveOverlays();
+    const key = `${leaveId}__${dateYmd}`;
+    const existing = overlays.find((o) => o.key === key);
+    const nextMotif = patch.motif !== undefined ? patch.motif : existing?.motif ?? '';
+    const nextRemplacant =
+      patch.remplacant !== undefined ? patch.remplacant : existing?.remplacant ?? '';
+
+    const updatedRecord: PlanningLeaveOverlay = {
+      key,
+      leaveId,
+      dateYmd,
+      motif: nextMotif,
+      remplacant: nextRemplacant,
+      updatedAt: clockService.nowIso(),
+      updatedByName: actor.fullName,
+    };
+
+    const next = existing
+      ? overlays.map((o) => (o.key === key ? updatedRecord : o))
+      : [...overlays, updatedRecord];
+    safeWriteJson(STORAGE_KEYS.PLANNING_LEAVE_META, next);
+    return {};
+  },
+
+  savePlanningManualRow(
+    input: {
+      weekStartYmd: string;
+      dateYmd: string;
+      slotIndex: number;
+      matricule: string;
+      employeeName: string;
+      startTime: string;
+      endTime: string;
+      motif: string;
+      remplacant: string;
+    },
+    actor: AppUser
+  ): { error?: string } {
+    if (!this.canUserAccessPlanning(actor)) {
+      return {
+        error: 'Accès refusé : vous n’êtes pas autorisé à modifier le Planning.',
+      };
+    }
+
+    if (!isValidYmd(input.dateYmd) || input.slotIndex < 0 || !Number.isInteger(input.slotIndex)) {
+      return { error: 'Ligne de Planning invalide.' };
+    }
+
+    const startTime = input.startTime.trim();
+    const endTime = input.endTime.trim();
+    if (startTime && !isValidHHmm(startTime)) {
+      return { error: 'Heure de début invalide.' };
+    }
+    if (endTime && !isValidHHmm(endTime)) {
+      return { error: 'Heure de fin invalide.' };
+    }
+    if (startTime && endTime && endTime <= startTime) {
+      return { error: 'L’heure de fin doit être postérieure à l’heure de début.' };
+    }
+
+    const all = this._readPlanningManualRows();
+    const isEmpty =
+      !input.matricule.trim() &&
+      !input.employeeName.trim() &&
+      !startTime &&
+      !endTime &&
+      !input.motif.trim() &&
+      !input.remplacant.trim();
+
+    const filtered = all.filter(
+      (r) => !(r.dateYmd === input.dateYmd && r.slotIndex === input.slotIndex)
+    );
+
+    if (isEmpty) {
+      safeWriteJson(STORAGE_KEYS.PLANNING_MANUAL_ROWS, filtered);
+      return {};
+    }
+
+    const nextRow: PlanningManualRow = {
+      id: generateUniqueId('plm'),
+      weekStartYmd: getMondayOfWeekYmd(input.weekStartYmd || input.dateYmd),
+      dateYmd: input.dateYmd,
+      slotIndex: input.slotIndex,
+      matricule: input.matricule.trim(),
+      employeeName: input.employeeName.trim(),
+      startTime,
+      endTime,
+      motif: input.motif,
+      remplacant: input.remplacant,
+      updatedAt: clockService.nowIso(),
+      updatedByName: actor.fullName,
+    };
+
+    safeWriteJson(STORAGE_KEYS.PLANNING_MANUAL_ROWS, [...filtered, nextRow]);
+    return {};
+  },
+
+  addPlanningDayRow(
+    weekStartYmd: string,
+    dateYmd: string,
+    actor: AppUser
+  ): { count?: number; error?: string } {
+    if (!this.canUserAccessPlanning(actor)) {
+      return {
+        error: 'Accès refusé : vous n’êtes pas autorisé à modifier le Planning.',
+      };
+    }
+    if (!isValidYmd(dateYmd)) {
+      return { error: 'Date invalide.' };
+    }
+    const counts = this._readPlanningDayRowCounts();
+    const manualForDay = this._readPlanningManualRows().filter((m) => m.dateYmd === dateYmd);
+    const highestSlot = manualForDay.reduce((max, r) => Math.max(max, r.slotIndex), -1);
+    const currentCount = Math.max(10, counts[dateYmd] ?? 10, highestSlot + 1);
+    const nextCount = currentCount + 1;
+    safeWriteJson(STORAGE_KEYS.PLANNING_DAY_ROW_COUNTS, {
+      ...counts,
+      [dateYmd]: nextCount,
+    });
+    void weekStartYmd;
+    return { count: nextCount };
   },
 
   // --- Chronomètres & État de service employé ---

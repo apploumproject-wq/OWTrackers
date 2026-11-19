@@ -31,6 +31,7 @@ export const PERMISSION_LABELS: Record<Permission, string> = {
   'export:reports': 'Exporter les rapports (Excel, CSV, PDF)',
   'manage:settings_permissions': 'Paramètres, permissions et traçabilité',
   'approve:outings': 'Valider sorties et demandes de correction',
+  'manage:leaves': 'Enregistrer, modifier et annuler les congés',
 };
 
 export const BASE_ROLE_PERMISSIONS: Record<UserRole, Permission[]> = {
@@ -47,6 +48,7 @@ export const BASE_ROLE_PERMISSIONS: Record<UserRole, Permission[]> = {
     'view:management_dashboard',
     'manage:employees',
     'manage:schedules',
+    'manage:leaves',
     'manage:quality',
     'view:objectives_stats',
     'approve:outings',
@@ -59,6 +61,7 @@ export const BASE_ROLE_PERMISSIONS: Record<UserRole, Permission[]> = {
     'manage:clients',
     'manage:tasks',
     'manage:schedules',
+    'manage:leaves',
     'manage:quality',
     'view:objectives_stats',
     'export:reports',
@@ -72,6 +75,7 @@ export const BASE_ROLE_PERMISSIONS: Record<UserRole, Permission[]> = {
     'manage:clients',
     'manage:tasks',
     'manage:schedules',
+    'manage:leaves',
     'manage:quality',
     'view:objectives_stats',
     'export:reports',
@@ -111,7 +115,8 @@ export interface NavItemConfig {
   id: NavModuleId;
   label: string;
   section: 'principal' | 'pilotage' | 'administration';
-  requiredPermission: Permission;
+  requiredPermission?: Permission;
+  requiresPlanningAccess?: boolean;
 }
 
 export const ALL_NAV_ITEMS: NavItemConfig[] = [
@@ -128,6 +133,8 @@ export const ALL_NAV_ITEMS: NavItemConfig[] = [
   { id: 'mgmt_teams', label: 'Équipes', section: 'pilotage', requiredPermission: 'manage:teams' },
   { id: 'mgmt_clients', label: 'Sociétés & tâches', section: 'pilotage', requiredPermission: 'manage:clients' },
   { id: 'mgmt_schedules', label: 'Horaires & sorties', section: 'pilotage', requiredPermission: 'manage:schedules' },
+  { id: 'mgmt_leaves', label: 'Gestion des congés', section: 'pilotage', requiredPermission: 'manage:leaves' },
+  { id: 'planning', label: 'Planning', section: 'pilotage', requiresPlanningAccess: true },
   { id: 'mgmt_quality', label: 'Contrôle qualité', section: 'pilotage', requiredPermission: 'manage:quality' },
   { id: 'mgmt_objectives', label: 'Objectifs & statistiques', section: 'pilotage', requiredPermission: 'view:objectives_stats' },
   { id: 'mgmt_reports', label: 'Rapports', section: 'administration', requiredPermission: 'export:reports' },
@@ -142,7 +149,14 @@ export function getPermissionsForRole(
   supervisorPermissions?: Permission[]
 ): Permission[] {
   if (role === 'supervisor' && supervisorPermissions) {
-    return Array.from(new Set(['view:own_profile', 'view:management_dashboard', ...supervisorPermissions]));
+    return Array.from(
+      new Set([
+        'view:own_profile',
+        'view:management_dashboard',
+        'manage:leaves',
+        ...supervisorPermissions,
+      ])
+    );
   }
   return BASE_ROLE_PERMISSIONS[role];
 }
@@ -157,20 +171,30 @@ export function hasPermission(
 
 export function getNavItemsForRole(
   role: UserRole,
-  supervisorPermissions?: Permission[]
+  supervisorPermissions?: Permission[],
+  canAccessPlanning = false
 ): NavItemConfig[] {
-  return ALL_NAV_ITEMS.filter((item) =>
-    hasPermission(role, item.requiredPermission, supervisorPermissions)
-  );
+  return ALL_NAV_ITEMS.filter((item) => {
+    if (item.requiresPlanningAccess) {
+      return role === 'admin' || canAccessPlanning;
+    }
+    if (!item.requiredPermission) return false;
+    return hasPermission(role, item.requiredPermission, supervisorPermissions);
+  });
 }
 
 export function canAccessModule(
   role: UserRole,
   moduleId: NavModuleId,
-  supervisorPermissions?: Permission[]
+  supervisorPermissions?: Permission[],
+  canAccessPlanning = false
 ): boolean {
   const item = ALL_NAV_ITEMS.find((nav) => nav.id === moduleId);
   if (!item) return false;
+  if (item.requiresPlanningAccess) {
+    return role === 'admin' || canAccessPlanning;
+  }
+  if (!item.requiredPermission) return false;
   return hasPermission(role, item.requiredPermission, supervisorPermissions);
 }
 

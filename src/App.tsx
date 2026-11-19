@@ -14,6 +14,7 @@ import {
   EmployeeScheduleConfig,
   EmployeeShiftState,
   GlobalAdminConfig,
+  LeaveRecord,
   ManagedEmployee,
   NavModuleId,
   OutingAuthorizationRequest,
@@ -56,6 +57,8 @@ import { QualityControlView } from './components/management/QualityControlView';
 import { ObjectivesStatsView } from './components/management/ObjectivesStatsView';
 import { ReportsView } from './components/management/ReportsView';
 import { SettingsAuditView } from './components/management/SettingsAuditView';
+import { LeavesManagementView } from './components/management/LeavesManagementView';
+import { PlanningView } from './components/management/PlanningView';
 
 export default function App() {
   const [currentUser, setCurrentUser] = useState<AppUser | null>(() =>
@@ -111,6 +114,16 @@ export default function App() {
   const [auditLogs, setAuditLogs] = useState<AuditLogEntry[]>(() =>
     storageService.getAuditLogs()
   );
+  const [planningAuthorizedUserIds, setPlanningAuthorizedUserIds] = useState<string[]>(() =>
+    storageService.getPlanningAuthorizedUserIds()
+  );
+  const [leaves, setLeaves] = useState<LeaveRecord[]>(() => {
+    const u = storageService.getSessionUser();
+    return u && storageService.canUserManageLeaves(u)
+      ? storageService.getLeavesForManagement(u).leaves
+      : [];
+  });
+  const [planningRevision, setPlanningRevision] = useState<number>(0);
 
   const [shiftState, setShiftState] = useState<EmployeeShiftState | null>(() => {
     const u = storageService.getSessionUser();
@@ -137,7 +150,7 @@ export default function App() {
     return () => window.clearInterval(id);
   }, [currentUser]);
 
-  const refreshAllStores = () => {
+  const refreshAllStores = (targetUser: AppUser | null = currentUser) => {
     setSupervisorPermissions(storageService.getSupervisorPermissions());
     setAdminConfig(storageService.getAdminConfig());
     setSchedules(storageService.getSchedules());
@@ -153,6 +166,12 @@ export default function App() {
     setQualityControls(storageService.getQualityControls());
     setCorrectionRequests(storageService.getCorrectionRequests());
     setAuditLogs(storageService.getAuditLogs());
+    setPlanningAuthorizedUserIds(storageService.getPlanningAuthorizedUserIds());
+    if (targetUser && storageService.canUserManageLeaves(targetUser)) {
+      setLeaves(storageService.getLeavesForManagement(targetUser).leaves);
+    } else {
+      setLeaves([]);
+    }
   };
 
   const loadUserWorkspace = (user: AppUser) => {
@@ -164,7 +183,7 @@ export default function App() {
     setCurrentUser(hydrated);
     setActiveModule(getDefaultModuleForRole(hydrated.role));
     setLastSavedActivity(null);
-    refreshAllStores();
+    refreshAllStores(hydrated);
     if (hydrated.role === 'employee') {
       setShiftState(storageService.getShiftState(hydrated.id));
       setActivities(storageService.getActivitiesForUser(hydrated.id));
@@ -189,12 +208,14 @@ export default function App() {
     setCurrentUser(null);
     setShiftState(null);
     setActivities([]);
+    setLeaves([]);
     setLastSavedActivity(null);
   };
 
   const handleSelectModule = (moduleId: NavModuleId) => {
     if (!currentUser) return;
-    if (canAccessModule(currentUser.role, moduleId, supervisorPermissions)) {
+    const canPlan = storageService.canUserAccessPlanning(currentUser);
+    if (canAccessModule(currentUser.role, moduleId, supervisorPermissions, canPlan)) {
       setActiveModule(moduleId);
     }
   };
@@ -324,6 +345,9 @@ export default function App() {
     if (!currentUser) return;
     setSupervisorPermissions(storageService.saveSupervisorPermissions(perms, currentUser));
     setAuditLogs(storageService.getAuditLogs());
+    if (storageService.canUserManageLeaves(currentUser)) {
+      setLeaves(storageService.getLeavesForManagement(currentUser).leaves);
+    }
   };
 
   const handleCreateAccount = async (
@@ -398,6 +422,12 @@ export default function App() {
         setCurrentUser(refreshedSession);
       }
     }
+    if (!res.error) {
+      setPlanningRevision((r) => r + 1);
+      if (storageService.canUserManageLeaves(currentUser)) {
+        setLeaves(storageService.getLeavesForManagement(currentUser).leaves);
+      }
+    }
     return res.error ? { error: res.error } : {};
   };
 
@@ -410,6 +440,12 @@ export default function App() {
     const res = storageService.setEmployeeAccountStatus(employeeId, status, currentUser, reason);
     setEmployees(res.users);
     setAuditLogs(storageService.getAuditLogs());
+    if (!res.error) {
+      setPlanningRevision((r) => r + 1);
+      if (storageService.canUserManageLeaves(currentUser)) {
+        setLeaves(storageService.getLeavesForManagement(currentUser).leaves);
+      }
+    }
     return res.error ? { error: res.error } : {};
   };
 
@@ -417,6 +453,9 @@ export default function App() {
     if (!currentUser) return;
     setTeams(storageService.saveTeam(team, currentUser));
     setAuditLogs(storageService.getAuditLogs());
+    if (storageService.canUserManageLeaves(currentUser)) {
+      setLeaves(storageService.getLeavesForManagement(currentUser).leaves);
+    }
   };
 
   const handleReviewCorrectionRequest = (
@@ -518,6 +557,63 @@ export default function App() {
     setObjectives(storageService.deleteObjective(id));
   };
 
+  const handleCreateLeave = (input: {
+    employeeId: string;
+    startDate: string;
+    endDate: string;
+    startTime: string;
+    endTime: string;
+  }): { error?: string } => {
+    if (!currentUser) return { error: 'Session expirée.' };
+    const res = storageService.createLeave(input, currentUser);
+    setLeaves(res.leaves);
+    setAuditLogs(storageService.getAuditLogs());
+    if (!res.error) setPlanningRevision((r) => r + 1);
+    return res.error ? { error: res.error } : {};
+  };
+
+  const handleUpdateLeave = (
+    leaveId: string,
+    patch: {
+      startDate: string;
+      endDate: string;
+      startTime: string;
+      endTime: string;
+    }
+  ): { error?: string } => {
+    if (!currentUser) return { error: 'Session expirée.' };
+    const res = storageService.updateLeave(leaveId, patch, currentUser);
+    setLeaves(res.leaves);
+    setAuditLogs(storageService.getAuditLogs());
+    if (!res.error) setPlanningRevision((r) => r + 1);
+    return res.error ? { error: res.error } : {};
+  };
+
+  const handleCancelLeave = (leaveId: string, reason?: string): { error?: string } => {
+    if (!currentUser) return { error: 'Session expirée.' };
+    const res = storageService.cancelLeave(leaveId, currentUser, reason);
+    setLeaves(res.leaves);
+    setAuditLogs(storageService.getAuditLogs());
+    if (!res.error) setPlanningRevision((r) => r + 1);
+    return res.error ? { error: res.error } : {};
+  };
+
+  const handleSetUserPlanningAccess = (
+    userId: string,
+    authorized: boolean
+  ): { error?: string } => {
+    if (!currentUser) return { error: 'Session expirée.' };
+    const res = storageService.setUserPlanningAccess(userId, authorized, currentUser);
+    setPlanningAuthorizedUserIds(res.authorizedUserIds);
+    setAuditLogs(storageService.getAuditLogs());
+    if (!res.error) setPlanningRevision((r) => r + 1);
+    return res.error ? { error: res.error } : {};
+  };
+
+  const handlePlanningChanged = () => {
+    setPlanningRevision((r) => r + 1);
+  };
+
   if (!currentUser) {
     const needsInitialSetup =
       !storageService.isSystemInitialized() || !storageService.hasAnyAdmin();
@@ -528,10 +624,12 @@ export default function App() {
     );
   }
 
+  const canAccessPlanning = storageService.canUserAccessPlanning(currentUser);
   const safeModule: NavModuleId = canAccessModule(
     currentUser.role,
     activeModule,
-    supervisorPermissions
+    supervisorPermissions,
+    canAccessPlanning
   )
     ? activeModule
     : getDefaultModuleForRole(currentUser.role);
@@ -551,11 +649,13 @@ export default function App() {
     currentUser.role === 'employee' ? storageService.getUsedPauseSlotsToday(currentUser.id) : {};
   const userOutingRequests = outingRequests.filter((r) => r.userId === currentUser.id);
   const userCorrectionRequests = correctionRequests.filter((r) => r.employeeId === currentUser.id);
+  const myLeaves = (void planningRevision, storageService.getMyValidatedLeaves(currentUser.id));
 
   return (
     <AppShell
       currentUser={currentUser}
       supervisorPermissions={supervisorPermissions}
+      canAccessPlanning={canAccessPlanning}
       activeModule={safeModule}
       onSelectModule={handleSelectModule}
       onLogout={handleLogout}
@@ -569,6 +669,7 @@ export default function App() {
               shiftState={shiftState}
               schedule={userSchedule}
               activities={activities}
+              myLeaves={myLeaves}
               nowMs={nowMs}
               livePresenceSeconds={livePresenceSeconds}
               liveProductiveSeconds={liveProductiveSeconds}
@@ -644,6 +745,7 @@ export default function App() {
               qualityControls={qualityControls}
               outingRequests={outingRequests}
               correctionRequests={correctionRequests}
+              myLeaves={myLeaves}
               onReviewOutingRequest={handleReviewOutingRequest}
               onNavigate={handleSelectModule}
             />
@@ -694,6 +796,17 @@ export default function App() {
               onReviewOutingRequest={handleReviewOutingRequest}
             />
           )}
+          {safeModule === 'mgmt_leaves' && storageService.canUserManageLeaves(currentUser) && (
+            <LeavesManagementView
+              user={currentUser}
+              employees={employees}
+              manageableEmployees={storageService.getManageableEmployeesForLeaves(currentUser)}
+              leaves={leaves}
+              onCreateLeave={handleCreateLeave}
+              onUpdateLeave={handleUpdateLeave}
+              onCancelLeave={handleCancelLeave}
+            />
+          )}
           {safeModule === 'mgmt_quality' && (
             <QualityControlView
               user={currentUser}
@@ -735,14 +848,26 @@ export default function App() {
             <SettingsAuditView
               adminConfig={adminConfig}
               supervisorPermissions={supervisorPermissions}
+              employees={employees}
+              planningAuthorizedUserIds={planningAuthorizedUserIds}
               auditLogs={auditLogs}
               theme={theme}
               onChangeTheme={handleChangeTheme}
               onSaveAdminConfig={handleSaveAdminConfig}
               onSaveSupervisorPermissions={handleSaveSupervisorPermissions}
+              onSetUserPlanningAccess={handleSetUserPlanningAccess}
             />
           )}
         </>
+      )}
+
+      {safeModule === 'planning' && canAccessPlanning && (
+        <PlanningView
+          user={currentUser}
+          employees={employees}
+          revision={planningRevision}
+          onPlanningChanged={handlePlanningChanged}
+        />
       )}
 
       {safeModule === 'profile' && (

@@ -34,7 +34,8 @@ export type Permission =
   | 'view:objectives_stats'
   | 'export:reports'
   | 'manage:settings_permissions'
-  | 'approve:outings';
+  | 'approve:outings'
+  | 'manage:leaves';
 
 export type NavModuleId =
   | 'employee_home'
@@ -49,6 +50,8 @@ export type NavModuleId =
   | 'mgmt_clients'
   | 'mgmt_tasks'
   | 'mgmt_schedules'
+  | 'mgmt_leaves'
+  | 'planning'
   | 'mgmt_quality'
   | 'mgmt_objectives'
   | 'mgmt_reports'
@@ -347,4 +350,105 @@ export interface DailyHistoryEntry {
   dossiersCount: number;
   targetDossiers: number;
   qualityScore: number;
+}
+
+export type LeaveStatus = 'valide' | 'annule';
+export type LeaveActionType = 'validation' | 'modification' | 'annulation';
+
+export interface LeaveActionTrace {
+  id: string;
+  action: LeaveActionType;
+  actorId: string;
+  actorName: string;
+  actorRole: UserRole;
+  timestamp: string;
+  details: string;
+}
+
+export interface LeaveRecord {
+  id: string;
+  employeeId: string;
+  employeeNameSnapshot: string;
+  employeeMatriculeSnapshot: string;
+  startDate: string; // YYYY-MM-DD
+  endDate: string; // YYYY-MM-DD
+  startTime: string; // HH:mm
+  endTime: string; // HH:mm
+  status: LeaveStatus;
+  createdById: string;
+  createdByName: string;
+  createdByRole: UserRole;
+  validatedAt: string;
+  updatedById?: string;
+  updatedByName?: string;
+  updatedByRole?: UserRole;
+  updatedAt?: string;
+  cancelledById?: string;
+  cancelledByName?: string;
+  cancelledByRole?: UserRole;
+  cancelledAt?: string;
+  cancellationReason?: string;
+  history: LeaveActionTrace[];
+}
+
+export interface PlanningLeaveOverlay {
+  key: string; // `${leaveId}__${dateYmd}`
+  leaveId: string;
+  dateYmd: string;
+  motif: string;
+  remplacant: string;
+  updatedAt?: string;
+  updatedByName?: string;
+}
+
+export interface PlanningManualRow {
+  id: string;
+  weekStartYmd: string;
+  dateYmd: string;
+  slotIndex: number;
+  matricule: string;
+  employeeName: string;
+  startTime: string;
+  endTime: string;
+  motif: string;
+  remplacant: string;
+  updatedAt: string;
+  updatedByName: string;
+}
+
+export interface PlanningDisplayRow {
+  rowKey: string;
+  source: 'leave' | 'manual';
+  dateYmd: string;
+  leaveId?: string;
+  slotIndex?: number;
+  matricule: string;
+  employeeName: string;
+  startTime: string;
+  endTime: string;
+  motif: string;
+  remplacant: string;
+}
+
+export interface PlanningWeekDay {
+  dateYmd: string;
+  dayLabel: string;
+  shortDate: string;
+  manualRowCount: number;
+  rows: PlanningDisplayRow[];
+}
+
+export interface PlanningWeekData {
+  weekStartYmd: string;
+  weekEndYmd: string;
+  days: PlanningWeekDay[];
+}
+
+export interface MyValidatedLeaveItem {
+  id: string;
+  startDate: string;
+  endDate: string;
+  startTime: string;
+  endTime: string;
+  motifs: string[];
 }
