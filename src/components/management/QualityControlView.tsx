@@ -5,6 +5,7 @@ import {
   CriterionRating,
   AppUser,
   ManagedEmployee,
+  ProjectRecord,
   QualityControlRecord,
   QualityCriterionConfig,
   QualityCriterionResult,
@@ -23,6 +24,7 @@ interface QualityControlViewProps {
   qualityControls: QualityControlRecord[];
   qualityCriteria: QualityCriterionConfig[];
   companies: CompanyRecord[];
+  projects: ProjectRecord[];
   employees: ManagedEmployee[];
   onEvaluateQc: (
     qcId: string,
@@ -41,12 +43,14 @@ export function QualityControlView({
   qualityControls,
   qualityCriteria,
   companies,
+  projects,
   employees,
   onEvaluateQc,
   onAddCriterion,
   onToggleCriterion,
 }: QualityControlViewProps) {
   const [statusFilter, setStatusFilter] = useState<'all' | QualityStatus>('all');
+  const [projectFilter, setProjectFilter] = useState<string>('all');
   const [companyFilter, setCompanyFilter] = useState<string>('all');
   const [employeeFilter, setEmployeeFilter] = useState<string>('all');
   const [selectedQc, setSelectedQc] = useState<QualityControlRecord | null>(null);
@@ -68,11 +72,14 @@ export function QualityControlView({
         : qualityControls;
     return base.filter((q) => {
       if (statusFilter !== 'all' && q.status !== statusFilter) return false;
+      if (projectFilter === 'none' && q.projectId) return false;
+      if (projectFilter !== 'all' && projectFilter !== 'none' && q.projectId !== projectFilter)
+        return false;
       if (companyFilter !== 'all' && q.companyId !== companyFilter) return false;
       if (employeeFilter !== 'all' && q.employeeId !== employeeFilter) return false;
       return true;
     });
-  }, [qualityControls, isSupervisor, user.teamId, statusFilter, companyFilter, employeeFilter]);
+  }, [qualityControls, isSupervisor, user.teamId, statusFilter, projectFilter, companyFilter, employeeFilter]);
 
   // RÈGLE STRICTE : Les dossiers non contrôlés ('en_attente') ne sont JAMAIS comptabilisés comme conformes
   const metrics = useMemo(() => {
@@ -238,6 +245,20 @@ export function QualityControlView({
         </select>
 
         <select
+          value={projectFilter}
+          onChange={(e) => setProjectFilter(e.target.value)}
+          className="px-3 py-2 text-xs border border-slate-300 dark:border-[#393342] rounded-lg bg-white dark:bg-[#211E27] text-slate-900 dark:text-white focus:outline-none focus:border-[#A83CE2]"
+        >
+          <option value="all">Tous les projets</option>
+          <option value="none">Sans projet (historique)</option>
+          {projects.map((p) => (
+            <option key={p.id} value={p.id}>
+              {p.name} {!p.active ? '(désactivé)' : ''}
+            </option>
+          ))}
+        </select>
+
+        <select
           value={companyFilter}
           onChange={(e) => setCompanyFilter(e.target.value)}
           className="px-3 py-2 text-xs border border-slate-300 dark:border-[#393342] rounded-lg bg-white dark:bg-[#211E27] text-slate-900 dark:text-white focus:outline-none focus:border-[#A83CE2]"
@@ -294,7 +315,8 @@ export function QualityControlView({
                   <tr key={qc.id} className="hover:bg-[#F7EEFC]/40 dark:hover:bg-[#211E27]/70">
                     <td className="py-3 px-5">
                       <div className="font-mono text-xs font-semibold text-slate-900 dark:text-white">
-                        {qc.dossierRef}
+                        {qc.dossierRef ||
+                          (qc.projectName ? `v${qc.formVersionNumber ?? 1}` : '—')}
                       </div>
                       <div className="text-[11px] text-slate-400 dark:text-[#C8C2D0]/70">
                         {formatDateTimeFr(qc.treatedAt)}
@@ -304,10 +326,20 @@ export function QualityControlView({
                       {qc.employeeName}
                     </td>
                     <td className="py-3 px-4 text-xs">
-                      <div className="font-medium text-slate-900 dark:text-white">
-                        {qc.companyName}
-                      </div>
-                      <div className="text-slate-500 dark:text-[#C8C2D0]">{qc.taskName}</div>
+                      {qc.projectName && (
+                        <div className="font-semibold text-[#7624A8] dark:text-[#D896FF]">
+                          {qc.projectName}
+                          {qc.formVersionNumber ? ` · v${qc.formVersionNumber}` : ''}
+                        </div>
+                      )}
+                      {qc.companyName && (
+                        <div className="font-medium text-slate-900 dark:text-white">
+                          {qc.companyName}
+                        </div>
+                      )}
+                      {qc.taskName && (
+                        <div className="text-slate-500 dark:text-[#C8C2D0]">{qc.taskName}</div>
+                      )}
                     </td>
                     <td className="py-3 px-4 font-mono text-xs text-slate-700 dark:text-[#C8C2D0] whitespace-nowrap">
                       {formatDurationHM(qc.durationSeconds)}
@@ -359,11 +391,28 @@ export function QualityControlView({
             <div className="flex items-start justify-between border-b border-slate-200 dark:border-[#393342] pb-4">
               <div>
                 <h3 className="text-base font-bold text-slate-900 dark:text-white">
-                  Contrôle dossier · <span className="font-mono">{selectedQc.dossierRef}</span>
+                  Contrôle dossier
+                  {selectedQc.dossierRef ? (
+                    <>
+                      {' '}
+                      · <span className="font-mono">{selectedQc.dossierRef}</span>
+                    </>
+                  ) : selectedQc.projectName ? (
+                    <> · {selectedQc.projectName}</>
+                  ) : null}
                 </h3>
                 <div className="text-xs text-slate-600 dark:text-[#C8C2D0] mt-0.5">
-                  {selectedQc.employeeName} · {selectedQc.companyName} · {selectedQc.taskName} (
-                  {formatDurationHM(selectedQc.durationSeconds)})
+                  {[
+                    selectedQc.employeeName,
+                    selectedQc.companyName,
+                    selectedQc.taskName,
+                  ]
+                    .filter(Boolean)
+                    .join(' · ')}{' '}
+                  ({formatDurationHM(selectedQc.durationSeconds)})
+                  {selectedQc.projectName
+                    ? ` · ${selectedQc.projectName} (v${selectedQc.formVersionNumber ?? 1})`
+                    : ''}
                 </div>
               </div>
               <button
@@ -374,6 +423,38 @@ export function QualityControlView({
                 <X className="w-4 h-4" />
               </button>
             </div>
+
+            {selectedQc.formFieldsSnapshot && selectedQc.formFieldsSnapshot.length > 0 && (
+              <div className="bg-slate-50 dark:bg-[#211E27] border border-slate-200 dark:border-[#393342] rounded-lg p-3.5 space-y-2 text-xs">
+                <div className="font-semibold text-[#7624A8] dark:text-[#D896FF]">
+                  Données du formulaire spécifique ({selectedQc.projectName} · v
+                  {selectedQc.formVersionNumber ?? 1})
+                </div>
+                <div className="grid grid-cols-1 sm:grid-cols-2 gap-2">
+                  {selectedQc.formFieldsSnapshot
+                    .slice()
+                    .sort((a, b) => a.order - b.order)
+                    .map((field) => {
+                      const val = selectedQc.customResponses?.[field.id];
+                      const formatted = Array.isArray(val)
+                        ? val.length > 0
+                          ? val.join(', ')
+                          : '—'
+                        : val && String(val).trim() !== ''
+                        ? String(val)
+                        : '—';
+                      return (
+                        <div key={field.id} className="space-y-0.5">
+                          <div className="text-slate-500 dark:text-[#C8C2D0]">{field.label}</div>
+                          <div className="font-medium text-slate-900 dark:text-white">
+                            {formatted}
+                          </div>
+                        </div>
+                      );
+                    })}
+                </div>
+              </div>
+            )}
 
             <div className="space-y-2.5">
               <div className="text-xs font-semibold text-slate-700 dark:text-[#C8C2D0]">

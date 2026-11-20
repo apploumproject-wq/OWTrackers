@@ -1,7 +1,8 @@
-import React, { useMemo } from 'react';
+import React, { useMemo, useState } from 'react';
 import {
   ActivityRecord,
   AppUser,
+  ProjectRecord,
   QualityControlRecord,
   ReferenceTimeEntry,
 } from '../../core/types';
@@ -13,6 +14,7 @@ interface EmployeeStatsViewProps {
   activities: ActivityRecord[];
   qualityControls: QualityControlRecord[];
   referenceTimes: ReferenceTimeEntry[];
+  projects: ProjectRecord[];
   livePresenceSeconds: number;
   liveProductiveSeconds: number;
   livePauseSeconds: number;
@@ -23,16 +25,55 @@ export function EmployeeStatsView({
   activities,
   qualityControls,
   referenceTimes,
+  projects,
   livePresenceSeconds,
   liveProductiveSeconds,
   livePauseSeconds,
 }: EmployeeStatsViewProps) {
+  const [projectFilter, setProjectFilter] = useState<string>('all');
+
+  const projectOptions = useMemo(() => {
+    const map = new Map<string, { id: string; name: string; active: boolean }>();
+    for (const p of projects) {
+      map.set(p.id, { id: p.id, name: p.name, active: p.active });
+    }
+    for (const a of activities) {
+      if (a.type === 'traitement' && a.projectId && !map.has(a.projectId)) {
+        map.set(a.projectId, {
+          id: a.projectId,
+          name: a.projectName ?? a.projectId,
+          active: false,
+        });
+      }
+    }
+    return Array.from(map.values());
+  }, [projects, activities]);
+
+  const allTreatments = useMemo(
+    () => activities.filter((a) => a.type === 'traitement'),
+    [activities]
+  );
+
+  const treatments = useMemo(() => {
+    return allTreatments.filter((a) => {
+      if (projectFilter === 'none') return !a.projectId;
+      if (projectFilter !== 'all') return a.projectId === projectFilter;
+      return true;
+    });
+  }, [allTreatments, projectFilter]);
+
   const history = useMemo(() => {
     const map: Record<
       string,
       { id: string; date: string; presenceSeconds: number; productiveSeconds: number }
     > = {};
     for (const act of activities) {
+      if (act.type === 'traitement') {
+        if (projectFilter === 'none' && act.projectId) continue;
+        if (projectFilter !== 'all' && projectFilter !== 'none' && act.projectId !== projectFilter) {
+          continue;
+        }
+      }
       const ymd = toYmd(new Date(act.startedAt));
       if (!map[ymd]) {
         map[ymd] = { id: ymd, date: ymd, presenceSeconds: 0, productiveSeconds: 0 };
@@ -40,13 +81,12 @@ export function EmployeeStatsView({
       if (act.type === 'traitement') {
         map[ymd].productiveSeconds += act.durationSeconds;
         map[ymd].presenceSeconds += act.durationSeconds;
-      } else if (act.type === 'sortie') {
+      } else if (act.type === 'sortie' && projectFilter === 'all') {
         map[ymd].presenceSeconds += act.durationSeconds;
       }
     }
     return Object.values(map).sort((a, b) => b.date.localeCompare(a.date)).slice(0, 7);
-  }, [activities]);
-  const treatments = useMemo(() => activities.filter((a) => a.type === 'traitement'), [activities]);
+  }, [activities, projectFilter]);
 
   const totalTreatmentSeconds = treatments.reduce((s, a) => s + a.durationSeconds, 0);
   const avgHandlingSeconds =
@@ -78,9 +118,21 @@ export function EmployeeStatsView({
     return Math.round((refTotalSec / actualSec) * 100);
   }, [treatments, referenceTimes]);
 
+  const byProject = useMemo(() => {
+    const map: Record<string, { count: number; seconds: number }> = {};
+    for (const cur of allTreatments) {
+      const label = cur.projectName || 'Sans projet';
+      if (!map[label]) map[label] = { count: 0, seconds: 0 };
+      map[label].count += 1;
+      map[label].seconds += cur.durationSeconds;
+    }
+    return Object.entries(map);
+  }, [allTreatments]);
+
   const byCompany = useMemo(() => {
     const map: Record<string, { count: number; seconds: number }> = {};
     for (const cur of treatments) {
+      if (!cur.clientName?.trim()) continue;
       if (!map[cur.clientName]) map[cur.clientName] = { count: 0, seconds: 0 };
       map[cur.clientName].count += 1;
       map[cur.clientName].seconds += cur.durationSeconds;
@@ -91,6 +143,7 @@ export function EmployeeStatsView({
   const byTask = useMemo(() => {
     const map: Record<string, { count: number; seconds: number }> = {};
     for (const cur of treatments) {
+      if (!cur.taskTitle?.trim()) continue;
       if (!map[cur.taskTitle]) map[cur.taskTitle] = { count: 0, seconds: 0 };
       map[cur.taskTitle].count += 1;
       map[cur.taskTitle].seconds += cur.durationSeconds;
@@ -98,10 +151,15 @@ export function EmployeeStatsView({
     return Object.entries(map);
   }, [treatments]);
 
-  const myQc = useMemo(
-    () => qualityControls.filter((q) => q.employeeId === user.id),
-    [qualityControls, user.id]
-  );
+  const myQc = useMemo(() => {
+    return qualityControls.filter((q) => {
+      if (q.employeeId !== user.id) return false;
+      if (projectFilter === 'none') return !q.projectId;
+      if (projectFilter !== 'all') return q.projectId === projectFilter;
+      return true;
+    });
+  }, [qualityControls, user.id, projectFilter]);
+
   const controlledQc = myQc.filter((q) => q.status !== 'en_attente');
   const compliantQc = controlledQc.filter(
     (q) => q.status === 'valide' || q.status === 'valide_observation'
@@ -127,16 +185,36 @@ export function EmployeeStatsView({
 
   return (
     <div className="space-y-6">
-      <SectionHeader title="Mes statistiques" />
+      <SectionHeader
+        title="Mes statistiques"
+        action={
+          projectOptions.length > 0 ? (
+            <select
+              aria-label="Filtrer par projet"
+              value={projectFilter}
+              onChange={(e) => setProjectFilter(e.target.value)}
+              className="px-3 py-2 text-xs border border-slate-300 dark:border-[#393342] rounded-lg bg-white dark:bg-[#292631] text-slate-900 dark:text-white focus:outline-none focus:border-[#A83CE2]"
+            >
+              <option value="all">Tous les projets</option>
+              <option value="none">Sans projet (historique)</option>
+              {projectOptions.map((p) => (
+                <option key={p.id} value={p.id}>
+                  {p.name} {!p.active ? '(désactivé)' : ''}
+                </option>
+              ))}
+            </select>
+          ) : undefined
+        }
+      />
 
       <div className="grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-4 gap-4">
         <StatTile
           label="Dossiers traités (historique)"
           value={treatments.length}
           subtext={
-            target !== null && objectivePct !== null
+            target !== null && objectivePct !== null && projectFilter === 'all'
               ? `Objectif jour : ${objectivePct}% (${dossiersTodayCount}/${target})`
-              : `Aujourd’hui : ${dossiersTodayCount} dossier(s) · Objectif : Non défini`
+              : `Aujourd’hui : ${dossiersTodayCount} dossier(s)`
           }
           accent="primary"
         />
@@ -173,7 +251,10 @@ export function EmployeeStatsView({
               history.map((day) => {
                 const maxSec = Math.max(8 * 3600, day.presenceSeconds);
                 const presencePct = Math.min(100, Math.round((day.presenceSeconds / maxSec) * 100));
-                const productivePct = Math.min(100, Math.round((day.productiveSeconds / maxSec) * 100));
+                const productivePct = Math.min(
+                  100,
+                  Math.round((day.productiveSeconds / maxSec) * 100)
+                );
                 return (
                   <div key={day.id} className="space-y-1.5">
                     <div className="flex items-center justify-between text-xs">
@@ -217,7 +298,33 @@ export function EmployeeStatsView({
         </section>
 
         <section className="lg:col-span-6 bg-white dark:bg-[#292631] border border-slate-200 dark:border-[#393342] rounded-lg p-6 space-y-6">
-          <div>
+          {byProject.length > 0 && (
+            <div>
+              <h2 className="text-base font-semibold text-slate-900 dark:text-white mb-3">
+                Répartition par projet
+              </h2>
+              <div className="divide-y divide-slate-100 dark:divide-[#393342]">
+                {byProject.map(([projName, stats]) => (
+                  <div
+                    key={projName}
+                    className="py-2.5 flex items-center justify-between gap-4 text-sm"
+                  >
+                    <div>
+                      <div className="font-medium text-slate-900 dark:text-white">{projName}</div>
+                      <div className="text-xs text-slate-500 dark:text-[#C8C2D0]">
+                        {stats.count} dossier(s)
+                      </div>
+                    </div>
+                    <div className="font-mono tabular-nums text-xs font-semibold text-[#7624A8] dark:text-[#D896FF]">
+                      {formatDurationHM(stats.seconds)}
+                    </div>
+                  </div>
+                ))}
+              </div>
+            </div>
+          )}
+
+          <div className={byProject.length > 0 ? 'pt-4 border-t border-slate-200 dark:border-[#393342]' : ''}>
             <h2 className="text-base font-semibold text-slate-900 dark:text-white mb-3">
               Répartition par société
             </h2>
@@ -228,9 +335,14 @@ export function EmployeeStatsView({
             ) : (
               <div className="divide-y divide-slate-100 dark:divide-[#393342]">
                 {byCompany.map(([companyName, stats]) => (
-                  <div key={companyName} className="py-2.5 flex items-center justify-between gap-4 text-sm">
+                  <div
+                    key={companyName}
+                    className="py-2.5 flex items-center justify-between gap-4 text-sm"
+                  >
                     <div>
-                      <div className="font-medium text-slate-900 dark:text-white">{companyName}</div>
+                      <div className="font-medium text-slate-900 dark:text-white">
+                        {companyName}
+                      </div>
                       <div className="text-xs text-slate-500 dark:text-[#C8C2D0]">
                         {stats.count} dossier(s)
                       </div>
@@ -292,7 +404,7 @@ export function EmployeeStatsView({
               <thead>
                 <tr className="border-b border-slate-200 dark:border-[#393342] bg-slate-50/70 dark:bg-[#211E27] text-xs font-medium text-slate-500 dark:text-[#C8C2D0]">
                   <th className="py-3 px-5">Dossier</th>
-                  <th className="py-3 px-4">Société & Tâche</th>
+                  <th className="py-3 px-4">Projet / Société & Tâche</th>
                   <th className="py-3 px-4">Contrôleur</th>
                   <th className="py-3 px-4">Observations</th>
                   <th className="py-3 px-5 text-right">Statut</th>
@@ -302,13 +414,24 @@ export function EmployeeStatsView({
                 {myQc.map((qc) => (
                   <tr key={qc.id} className="hover:bg-[#F7EEFC]/40 dark:hover:bg-[#211E27]/70">
                     <td className="py-3 px-5 font-mono text-xs font-semibold text-slate-900 dark:text-white">
-                      {qc.dossierRef}
+                      {qc.dossierRef ||
+                        (qc.projectName ? `v${qc.formVersionNumber ?? 1}` : '—')}
                     </td>
                     <td className="py-3 px-4 text-xs">
-                      <div className="font-medium text-slate-900 dark:text-white">
-                        {qc.companyName}
-                      </div>
-                      <div className="text-slate-500 dark:text-[#C8C2D0]">{qc.taskName}</div>
+                      {qc.projectName && (
+                        <div className="font-semibold text-[#7624A8] dark:text-[#D896FF]">
+                          {qc.projectName}
+                          {qc.formVersionNumber ? ` · v${qc.formVersionNumber}` : ''}
+                        </div>
+                      )}
+                      {qc.companyName && (
+                        <div className="font-medium text-slate-900 dark:text-white">
+                          {qc.companyName}
+                        </div>
+                      )}
+                      {qc.taskName && (
+                        <div className="text-slate-500 dark:text-[#C8C2D0]">{qc.taskName}</div>
+                      )}
                     </td>
                     <td className="py-3 px-4 text-xs text-slate-600 dark:text-[#C8C2D0]">
                       {qc.controllerName ?? '—'}

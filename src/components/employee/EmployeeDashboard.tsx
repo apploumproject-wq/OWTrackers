@@ -217,7 +217,9 @@ export function EmployeeDashboard({
             <div>
               <div className="text-xs font-semibold text-[#7624A8] dark:text-[#D896FF]">
                 {activeTimer.type === 'traitement'
-                  ? 'Traitement en cours'
+                  ? activeTimer.projectName
+                    ? `Traitement en cours · ${activeTimer.projectName}`
+                    : 'Traitement en cours'
                   : activeTimer.type === 'pause'
                   ? activeTimer.taskTitle
                   : `Sortie : ${activeTimer.taskTitle}`}
@@ -225,6 +227,9 @@ export function EmployeeDashboard({
               <div className="text-xs text-slate-700 dark:text-[#C8C2D0] mt-0.5">
                 Début : {formatTimeShort(activeTimer.startedAt)}
                 {activeTimer.dossierRef ? ` · Réf. ${activeTimer.dossierRef}` : ''}
+                {!activeTimer.dossierRef && activeTimer.formVersionNumber
+                  ? ` · Formulaire v${activeTimer.formVersionNumber}`
+                  : ''}
               </div>
             </div>
           </div>
@@ -341,7 +346,12 @@ export function EmployeeDashboard({
                   >
                     <td className="py-3 px-5">
                       <div className="font-medium text-slate-900 dark:text-white">
-                        {act.taskTitle}
+                        {act.taskTitle ||
+                          (act.projectName
+                            ? `${act.projectName}${
+                                act.formVersionNumber ? ` (v${act.formVersionNumber})` : ''
+                              }`
+                            : 'Traitement')}
                       </div>
                       <div className="text-xs text-slate-500 dark:text-[#C8C2D0] mt-0.5 capitalize">
                         {act.type}
@@ -349,12 +359,26 @@ export function EmployeeDashboard({
                       </div>
                     </td>
                     <td className="py-3 px-4">
-                      <div className="text-slate-800 dark:text-white text-xs font-medium">
-                        {act.clientName}
-                      </div>
-                      <div className="text-xs font-mono text-slate-500 dark:text-[#C8C2D0]">
-                        {act.dossierRef}
-                      </div>
+                      {act.clientName || act.dossierRef ? (
+                        <>
+                          {act.clientName && (
+                            <div className="text-slate-800 dark:text-white text-xs font-medium">
+                              {act.clientName}
+                            </div>
+                          )}
+                          {act.dossierRef && (
+                            <div className="text-xs font-mono text-slate-500 dark:text-[#C8C2D0]">
+                              {act.dossierRef}
+                            </div>
+                          )}
+                        </>
+                      ) : (
+                        <div className="text-xs text-slate-500 dark:text-[#C8C2D0]">
+                          {act.formFieldsSnapshot?.length
+                            ? `${act.formFieldsSnapshot.length} champ(s) saisi(s)`
+                            : '—'}
+                        </div>
+                      )}
                     </td>
                     <td className="py-3 px-4 font-mono tabular-nums text-xs text-slate-600 dark:text-[#C8C2D0] whitespace-nowrap">
                       {formatTimeShort(act.startedAt)} – {formatTimeShort(act.endedAt)}

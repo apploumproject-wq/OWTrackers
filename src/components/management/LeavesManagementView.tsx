@@ -1,16 +1,14 @@
 import React, { useMemo, useState } from 'react';
 import {
-  AlertTriangle,
   CalendarCheck2,
   Check,
   Edit3,
   History,
   Search,
   X,
-  XCircle,
 } from 'lucide-react';
-import { AppUser, LeaveRecord, ManagedEmployee } from '../../core/types';
-import { ROLE_LABELS } from '../../core/permissions';
+import { AppUser, LeaveRecord, LeaveStatus, ManagedEmployee } from '../../core/types';
+import { LEAVE_STATUS_LABELS, ROLE_LABELS } from '../../core/permissions';
 import { formatDateTimeFr, formatYmdFr, toYmd } from '../../utils/formatters';
 import { SectionHeader } from '../ui/DataPrimitives';
 
@@ -25,6 +23,8 @@ interface LeavesManagementViewProps {
     endDate: string;
     startTime: string;
     endTime: string;
+    motif?: string;
+    status: LeaveStatus;
   }) => { error?: string };
   onUpdateLeave: (
     leaveId: string,
@@ -33,16 +33,24 @@ interface LeavesManagementViewProps {
       endDate: string;
       startTime: string;
       endTime: string;
+      motif?: string;
+      status: LeaveStatus;
     }
   ) => { error?: string };
-  onCancelLeave: (leaveId: string, reason?: string) => { error?: string };
+  onUpdateLeaveStatus: (leaveId: string, status: LeaveStatus) => { error?: string };
 }
 
 const ACTION_LABELS = {
-  validation: 'Validation',
+  creation: 'Enregistrement',
   modification: 'Modification',
-  annulation: 'Annulation',
+  statut: 'Changement de statut',
 } as const;
+
+const STATUS_TEXT_CLASS: Record<LeaveStatus, string> = {
+  en_attente: 'text-amber-700 dark:text-amber-400',
+  valide: 'text-emerald-700 dark:text-emerald-400',
+  refuse: 'text-red-700 dark:text-red-400',
+};
 
 export function LeavesManagementView({
   user,
@@ -51,7 +59,7 @@ export function LeavesManagementView({
   leaves,
   onCreateLeave,
   onUpdateLeave,
-  onCancelLeave,
+  onUpdateLeaveStatus,
 }: LeavesManagementViewProps) {
   const todayYmd = toYmd(new Date());
 
@@ -62,16 +70,16 @@ export function LeavesManagementView({
   const [endDate, setEndDate] = useState<string>(todayYmd);
   const [startTime, setStartTime] = useState<string>('08:30');
   const [endTime, setEndTime] = useState<string>('17:00');
+  const [motif, setMotif] = useState<string>('');
+  const [status, setStatus] = useState<LeaveStatus>('en_attente');
   const [editingLeaveId, setEditingLeaveId] = useState<string | null>(null);
 
   const [formError, setFormError] = useState<string | null>(null);
   const [formSuccess, setFormSuccess] = useState<string | null>(null);
 
   const [search, setSearch] = useState('');
-  const [statusFilter, setStatusFilter] = useState<'valide' | 'annule' | 'all'>('valide');
+  const [statusFilter, setStatusFilter] = useState<'all' | LeaveStatus>('all');
   const [historyLeave, setHistoryLeave] = useState<LeaveRecord | null>(null);
-  const [pendingCancelLeave, setPendingCancelLeave] = useState<LeaveRecord | null>(null);
-  const [cancelReason, setCancelReason] = useState('');
 
   const effectiveSelectedEmployeeId = useMemo(() => {
     if (editingLeaveId) {
@@ -110,6 +118,7 @@ export function LeavesManagementView({
       return (
         info.fullName.toLowerCase().includes(q) ||
         info.matricule.toLowerCase().includes(q) ||
+        (lv.motif ?? '').toLowerCase().includes(q) ||
         lv.startDate.includes(q) ||
         lv.endDate.includes(q)
       );
@@ -122,6 +131,8 @@ export function LeavesManagementView({
     setEndDate(todayYmd);
     setStartTime('08:30');
     setEndTime('17:00');
+    setMotif('');
+    setStatus('en_attente');
     setFormError(null);
   };
 
@@ -132,6 +143,8 @@ export function LeavesManagementView({
     setEndDate(leave.endDate);
     setStartTime(leave.startTime);
     setEndTime(leave.endTime);
+    setMotif(leave.motif ?? '');
+    setStatus(leave.status);
     setFormError(null);
     setFormSuccess(null);
   };
@@ -147,12 +160,14 @@ export function LeavesManagementView({
         endDate,
         startTime,
         endTime,
+        motif,
+        status,
       });
       if (res.error) {
         setFormError(res.error);
         return;
       }
-      setFormSuccess('Congé mis à jour et synchronisé avec le Planning.');
+      setFormSuccess('Congé mis à jour.');
       resetFormToCreate();
       return;
     }
@@ -168,42 +183,40 @@ export function LeavesManagementView({
       endDate,
       startTime,
       endTime,
+      motif,
+      status,
     });
     if (res.error) {
       setFormError(res.error);
       return;
     }
 
-    setFormSuccess('Congé validé et ajouté automatiquement au Planning.');
+    setFormSuccess(`Demande enregistrée (${LEAVE_STATUS_LABELS[status]}).`);
     setStartDate(todayYmd);
     setEndDate(todayYmd);
+    setMotif('');
   };
 
-  const handleConfirmCancel = () => {
-    if (!pendingCancelLeave) return;
+  const handleInlineStatusChange = (leaveId: string, nextStatus: LeaveStatus) => {
     setFormError(null);
     setFormSuccess(null);
-    const res = onCancelLeave(pendingCancelLeave.id, cancelReason);
-    setPendingCancelLeave(null);
-    setCancelReason('');
+    const res = onUpdateLeaveStatus(leaveId, nextStatus);
     if (res.error) {
       setFormError(res.error);
       return;
     }
-    if (editingLeaveId === pendingCancelLeave.id) {
-      resetFormToCreate();
-    }
-    setFormSuccess('Congé annulé et retiré du Planning.');
+    setFormSuccess(`Statut mis à jour : ${LEAVE_STATUS_LABELS[nextStatus]}.`);
   };
 
+  const pendingCount = leaves.filter((l) => l.status === 'en_attente').length;
   const validatedCount = leaves.filter((l) => l.status === 'valide').length;
-  const cancelledCount = leaves.filter((l) => l.status === 'annule').length;
+  const refusedCount = leaves.filter((l) => l.status === 'refuse').length;
 
   return (
     <div className="space-y-6">
       <SectionHeader
         title="Gestion des congés"
-        meta={`Enregistrement et validation directe · ${ROLE_LABELS[user.role]} (${user.fullName})`}
+        meta={`Enregistrement et suivi des congés · ${ROLE_LABELS[user.role]} (${user.fullName})`}
       />
 
       <form
@@ -213,12 +226,10 @@ export function LeavesManagementView({
         <div className="flex flex-col sm:flex-row sm:items-center sm:justify-between gap-2 pb-3 border-b border-slate-200 dark:border-[#393342]">
           <div>
             <h2 className="text-base font-semibold text-slate-900 dark:text-white">
-              {editingLeaveId
-                ? 'Modifier un congé validé'
-                : 'Enregistrer et valider un congé'}
+              {editingLeaveId ? 'Modifier une demande de congé' : 'Enregistrer un congé'}
             </h2>
             <p className="text-xs text-slate-500 dark:text-[#C8C2D0] mt-0.5">
-              Les congés validés sont automatiquement reportés dans les jours correspondants du Planning.
+              Les congés sont visibles dans l’espace « Mes congés » du collaborateur selon leur statut (En attente, Validé, Refusé). Le Planning reste indépendant.
             </p>
           </div>
           {editingLeaveId && (
@@ -365,15 +376,49 @@ export function LeavesManagementView({
               />
             </div>
 
-            <div className="sm:col-span-2 lg:col-span-4 flex items-end justify-end">
+            <div className="sm:col-span-2">
+              <label
+                htmlFor="owt-leave-motif"
+                className="block font-medium text-slate-700 dark:text-[#C8C2D0] mb-1"
+              >
+                Motif (facultatif)
+              </label>
+              <input
+                id="owt-leave-motif"
+                type="text"
+                value={motif}
+                onChange={(e) => setMotif(e.target.value)}
+                placeholder="Ex. Congé annuel, rendez-vous personnel..."
+                className="w-full px-3 py-2 bg-white dark:bg-[#211E27] text-slate-900 dark:text-white border border-slate-300 dark:border-[#393342] rounded-lg focus:outline-none focus:border-[#A83CE2]"
+              />
+            </div>
+
+            <div>
+              <label
+                htmlFor="owt-leave-status"
+                className="block font-medium text-slate-700 dark:text-[#C8C2D0] mb-1"
+              >
+                Statut *
+              </label>
+              <select
+                id="owt-leave-status"
+                value={status}
+                onChange={(e) => setStatus(e.target.value as LeaveStatus)}
+                className="w-full px-3 py-2 bg-white dark:bg-[#211E27] text-slate-900 dark:text-white border border-slate-300 dark:border-[#393342] rounded-lg focus:outline-none focus:border-[#A83CE2]"
+              >
+                <option value="en_attente">En attente</option>
+                <option value="valide">Validé</option>
+                <option value="refuse">Refusé</option>
+              </select>
+            </div>
+
+            <div className="flex items-end justify-end">
               <button
                 type="submit"
-                className="inline-flex items-center gap-2 px-5 py-2.5 bg-[#A83CE2] hover:bg-[#7624A8] text-white text-xs font-semibold rounded-lg transition-colors cursor-pointer whitespace-nowrap"
+                className="w-full inline-flex items-center justify-center gap-2 px-4 py-2 bg-[#A83CE2] hover:bg-[#7624A8] text-white text-xs font-semibold rounded-lg transition-colors cursor-pointer whitespace-nowrap"
               >
                 <CalendarCheck2 className="w-4 h-4 shrink-0" aria-hidden="true" />
-                <span>
-                  {editingLeaveId ? 'Enregistrer la modification' : 'Valider le congé'}
-                </span>
+                <span>{editingLeaveId ? 'Mettre à jour' : 'Enregistrer'}</span>
               </button>
             </div>
           </div>
@@ -400,16 +445,17 @@ export function LeavesManagementView({
             type="text"
             value={search}
             onChange={(e) => setSearch(e.target.value)}
-            placeholder="Rechercher par nom, matricule ou date..."
+            placeholder="Rechercher par nom, matricule, motif ou date..."
             className="w-full pl-9 pr-3 py-2 text-sm bg-white dark:bg-[#211E27] text-slate-900 dark:text-white placeholder:text-slate-400 dark:placeholder:text-[#C8C2D0]/60 border border-slate-300 dark:border-[#393342] rounded-lg focus:outline-none focus:border-[#A83CE2]"
           />
         </div>
-        <div className="flex items-center gap-1 p-1 bg-slate-100 dark:bg-[#211E27] rounded-lg w-fit">
+        <div className="flex flex-wrap items-center gap-1 p-1 bg-slate-100 dark:bg-[#211E27] rounded-lg w-fit">
           {(
             [
-              { id: 'valide', label: `Validés (${validatedCount})` },
-              { id: 'annule', label: `Annulés (${cancelledCount})` },
               { id: 'all', label: `Tous (${leaves.length})` },
+              { id: 'en_attente', label: `En attente (${pendingCount})` },
+              { id: 'valide', label: `Validés (${validatedCount})` },
+              { id: 'refuse', label: `Refusés (${refusedCount})` },
             ] as const
           ).map((tab) => (
             <button
@@ -436,6 +482,7 @@ export function LeavesManagementView({
                 <th className="py-3 px-5">Employé</th>
                 <th className="py-3 px-4">Période</th>
                 <th className="py-3 px-4">Horaires</th>
+                <th className="py-3 px-4">Motif</th>
                 <th className="py-3 px-4">Statut</th>
                 <th className="py-3 px-4">Traçabilité</th>
                 <th className="py-3 px-5 text-right">Actions</th>
@@ -445,7 +492,7 @@ export function LeavesManagementView({
               {filteredLeaves.length === 0 ? (
                 <tr>
                   <td
-                    colSpan={6}
+                    colSpan={7}
                     className="py-8 px-5 text-center text-xs text-slate-500 dark:text-[#C8C2D0]"
                   >
                     Aucun congé enregistré pour ces critères.
@@ -476,16 +523,24 @@ export function LeavesManagementView({
                       <td className="py-3 px-4 font-mono tabular-nums text-xs font-semibold text-[#7624A8] dark:text-[#D896FF] whitespace-nowrap">
                         {leave.startTime} – {leave.endTime}
                       </td>
+                      <td className="py-3 px-4 text-xs text-slate-600 dark:text-[#C8C2D0] max-w-[200px] truncate">
+                        {leave.motif || '—'}
+                      </td>
                       <td className="py-3 px-4 text-xs">
-                        <span
-                          className={`font-semibold ${
-                            leave.status === 'valide'
-                              ? 'text-emerald-700 dark:text-emerald-400'
-                              : 'text-slate-500 dark:text-[#C8C2D0]'
+                        <select
+                          aria-label={`Statut congé ${info.fullName}`}
+                          value={leave.status}
+                          onChange={(e) =>
+                            handleInlineStatusChange(leave.id, e.target.value as LeaveStatus)
+                          }
+                          className={`px-2 py-1 text-xs font-semibold bg-white dark:bg-[#211E27] border border-slate-300 dark:border-[#393342] rounded focus:outline-none focus:border-[#A83CE2] cursor-pointer ${
+                            STATUS_TEXT_CLASS[leave.status]
                           }`}
                         >
-                          {leave.status === 'valide' ? 'Validé' : 'Annulé'}
-                        </span>
+                          <option value="en_attente">En attente</option>
+                          <option value="valide">Validé</option>
+                          <option value="refuse">Refusé</option>
+                        </select>
                       </td>
                       <td className="py-3 px-4 text-xs text-slate-600 dark:text-[#C8C2D0]">
                         {latestTrace ? (
@@ -511,29 +566,14 @@ export function LeavesManagementView({
                           >
                             <History className="w-4 h-4" />
                           </button>
-                          {leave.status === 'valide' && (
-                            <>
-                              <button
-                                type="button"
-                                onClick={() => startEditLeave(leave)}
-                                title="Modifier ce congé"
-                                className="p-1.5 rounded-lg text-slate-600 dark:text-[#C8C2D0] hover:text-[#7624A8] dark:hover:text-[#D896FF] hover:bg-[#F7EEFC] dark:hover:bg-[#A83CE2]/20 cursor-pointer"
-                              >
-                                <Edit3 className="w-4 h-4" />
-                              </button>
-                              <button
-                                type="button"
-                                onClick={() => {
-                                  setCancelReason('');
-                                  setPendingCancelLeave(leave);
-                                }}
-                                title="Annuler ce congé"
-                                className="p-1.5 rounded-lg text-red-700 dark:text-red-400 hover:bg-red-50 dark:hover:bg-red-950/40 cursor-pointer"
-                              >
-                                <XCircle className="w-4 h-4" />
-                              </button>
-                            </>
-                          )}
+                          <button
+                            type="button"
+                            onClick={() => startEditLeave(leave)}
+                            title="Modifier ce congé"
+                            className="p-1.5 rounded-lg text-slate-600 dark:text-[#C8C2D0] hover:text-[#7624A8] dark:hover:text-[#D896FF] hover:bg-[#F7EEFC] dark:hover:bg-[#A83CE2]/20 cursor-pointer"
+                          >
+                            <Edit3 className="w-4 h-4" />
+                          </button>
                         </div>
                       </td>
                     </tr>
@@ -581,6 +621,11 @@ export function LeavesManagementView({
                   <div className="flex items-center justify-between gap-2">
                     <span className="font-semibold text-[#7624A8] dark:text-[#D896FF]">
                       {ACTION_LABELS[entry.action]}
+                      {entry.oldStatus && entry.newStatus && entry.oldStatus !== entry.newStatus
+                        ? ` (${LEAVE_STATUS_LABELS[entry.oldStatus]} → ${
+                            LEAVE_STATUS_LABELS[entry.newStatus]
+                          })`
+                        : ''}
                     </span>
                     <span className="font-mono text-slate-500 dark:text-[#C8C2D0]">
                       {formatDateTimeFr(entry.timestamp)}
@@ -592,81 +637,6 @@ export function LeavesManagementView({
                   <div className="text-slate-600 dark:text-[#C8C2D0]">{entry.details}</div>
                 </div>
               ))}
-            </div>
-          </div>
-        </div>
-      )}
-
-      {pendingCancelLeave && (
-        <div className="fixed inset-0 z-50 flex items-center justify-center p-4">
-          <div
-            className="fixed inset-0 bg-slate-900/50 dark:bg-black/70"
-            onClick={() => setPendingCancelLeave(null)}
-            aria-hidden="true"
-          />
-          <div className="relative bg-white dark:bg-[#292631] border border-slate-200 dark:border-[#393342] rounded-xl max-w-md w-full p-6 space-y-4 shadow-xl z-10">
-            <div className="flex items-start justify-between gap-3">
-              <div className="flex items-center gap-2.5 text-red-700 dark:text-red-400">
-                <AlertTriangle className="w-5 h-5 shrink-0" aria-hidden="true" />
-                <h3 className="text-base font-bold text-slate-900 dark:text-white">
-                  Confirmer l’annulation du congé
-                </h3>
-              </div>
-              <button
-                type="button"
-                onClick={() => setPendingCancelLeave(null)}
-                className="p-1.5 rounded-lg text-slate-400 dark:text-[#C8C2D0] hover:text-slate-700 dark:hover:text-white cursor-pointer"
-                aria-label="Fermer"
-              >
-                <X className="w-4 h-4" />
-              </button>
-            </div>
-
-            <div className="bg-slate-50 dark:bg-[#211E27] border border-slate-200 dark:border-[#393342] rounded-lg p-3.5 text-xs space-y-1">
-              <div className="font-semibold text-sm text-slate-900 dark:text-white">
-                {resolveEmployeeInfo(pendingCancelLeave).fullName}
-              </div>
-              <div className="font-mono text-[#7624A8] dark:text-[#D896FF]">
-                {resolveEmployeeInfo(pendingCancelLeave).matricule} ·{' '}
-                {pendingCancelLeave.startDate === pendingCancelLeave.endDate
-                  ? formatYmdFr(pendingCancelLeave.startDate)
-                  : `${formatYmdFr(pendingCancelLeave.startDate)} → ${formatYmdFr(pendingCancelLeave.endDate)}`}{' '}
-                ({pendingCancelLeave.startTime}–{pendingCancelLeave.endTime})
-              </div>
-            </div>
-
-            <div className="text-xs">
-              <label
-                htmlFor="owt-leave-cancel-reason"
-                className="block font-medium text-slate-700 dark:text-[#C8C2D0] mb-1"
-              >
-                Motif d’annulation (facultatif)
-              </label>
-              <input
-                id="owt-leave-cancel-reason"
-                type="text"
-                value={cancelReason}
-                onChange={(e) => setCancelReason(e.target.value)}
-                placeholder="Ex. Report demandé par le collaborateur"
-                className="w-full px-3 py-2 bg-white dark:bg-[#211E27] text-slate-900 dark:text-white border border-slate-300 dark:border-[#393342] rounded-lg focus:outline-none focus:border-[#A83CE2]"
-              />
-            </div>
-
-            <div className="flex justify-end gap-2 pt-2">
-              <button
-                type="button"
-                onClick={() => setPendingCancelLeave(null)}
-                className="px-4 py-2 text-xs font-semibold text-slate-600 dark:text-[#C8C2D0] hover:bg-slate-100 dark:hover:bg-[#211E27] rounded-lg cursor-pointer"
-              >
-                Conserver
-              </button>
-              <button
-                type="button"
-                onClick={handleConfirmCancel}
-                className="px-4 py-2 bg-red-600 hover:bg-red-700 text-white text-xs font-semibold rounded-lg cursor-pointer"
-              >
-                Annuler le congé
-              </button>
             </div>
           </div>
         </div>

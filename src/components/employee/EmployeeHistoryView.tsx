@@ -1,5 +1,5 @@
 import React, { useMemo, useState } from 'react';
-import { Lock, MessageSquareWarning, Send, X } from 'lucide-react';
+import { Eye, Lock, MessageSquareWarning, Send, X } from 'lucide-react';
 import {
   ActivityRecord,
   ActivityType,
@@ -34,6 +34,7 @@ export function EmployeeHistoryView({
   const [period, setPeriod] = useState<'jour' | 'semaine' | 'mois'>('jour');
   const [typeFilter, setTypeFilter] = useState<'all' | ActivityType>('all');
   const [selectedActivity, setSelectedActivity] = useState<ActivityRecord | null>(null);
+  const [detailActivity, setDetailActivity] = useState<ActivityRecord | null>(null);
   const [reason, setReason] = useState('');
   const [formError, setFormError] = useState<string | null>(null);
 
@@ -254,7 +255,7 @@ export function EmployeeHistoryView({
                       </td>
                       <td className="py-3 px-4">
                         <div className="font-medium text-slate-900 dark:text-white">
-                          {op.taskTitle}
+                          {op.taskTitle || op.projectName || 'Traitement'}
                         </div>
                         {op.notes && (
                           <div className="text-xs text-slate-500 dark:text-[#C8C2D0] mt-0.5">
@@ -263,12 +264,25 @@ export function EmployeeHistoryView({
                         )}
                       </td>
                       <td className="py-3 px-4 text-xs text-slate-600 dark:text-[#C8C2D0] space-y-0.5">
-                        <div>
-                          <span className="font-medium text-slate-800 dark:text-white">
-                            {op.clientName}
-                          </span>{' '}
-                          · <span className="font-mono">{op.dossierRef}</span>
-                        </div>
+                        {op.projectName && (
+                          <div className="font-semibold text-[#7624A8] dark:text-[#D896FF]">
+                            {op.projectName}
+                            {op.formVersionNumber ? ` · v${op.formVersionNumber}` : ''}
+                          </div>
+                        )}
+                        {(op.clientName || op.dossierRef) ? (
+                          <div>
+                            {op.clientName && (
+                              <span className="font-medium text-slate-800 dark:text-white">
+                                {op.clientName}
+                              </span>
+                            )}
+                            {op.clientName && op.dossierRef ? ' · ' : ''}
+                            {op.dossierRef && <span className="font-mono">{op.dossierRef}</span>}
+                          </div>
+                        ) : op.formFieldsSnapshot && op.formFieldsSnapshot.length > 0 ? (
+                          <div>{op.formFieldsSnapshot.length} champ(s) saisi(s)</div>
+                        ) : null}
                         {op.receptionChannel && <div>{op.receptionChannel}</div>}
                       </td>
                       <td className="py-3 px-4 font-mono tabular-nums text-xs text-slate-600 dark:text-[#C8C2D0] whitespace-nowrap">
@@ -283,36 +297,48 @@ export function EmployeeHistoryView({
                         ) : null}
                       </td>
                       <td className="py-3 px-5 text-right whitespace-nowrap">
-                        {existingReq ? (
-                          <span
-                            className={`text-xs font-medium ${
-                              existingReq.status === 'approuvee'
-                                ? 'text-emerald-700 dark:text-emerald-400'
+                        <div className="inline-flex items-center justify-end gap-3">
+                          {op.formFieldsSnapshot && op.formFieldsSnapshot.length > 0 && (
+                            <button
+                              type="button"
+                              onClick={() => setDetailActivity(op)}
+                              className="inline-flex items-center gap-1 text-xs font-medium text-slate-600 dark:text-[#C8C2D0] hover:text-[#7624A8] dark:hover:text-[#D896FF] cursor-pointer"
+                            >
+                              <Eye className="w-3.5 h-3.5" aria-hidden="true" />
+                              <span>Formulaire</span>
+                            </button>
+                          )}
+                          {existingReq ? (
+                            <span
+                              className={`text-xs font-medium ${
+                                existingReq.status === 'approuvee'
+                                  ? 'text-emerald-700 dark:text-emerald-400'
+                                  : existingReq.status === 'refusee'
+                                  ? 'text-red-700 dark:text-red-400'
+                                  : 'text-amber-700 dark:text-amber-400'
+                              }`}
+                            >
+                              {existingReq.status === 'approuvee'
+                                ? 'Correction approuvée'
                                 : existingReq.status === 'refusee'
-                                ? 'text-red-700 dark:text-red-400'
-                                : 'text-amber-700 dark:text-amber-400'
-                            }`}
-                          >
-                            {existingReq.status === 'approuvee'
-                              ? 'Correction approuvée'
-                              : existingReq.status === 'refusee'
-                              ? 'Correction refusée'
-                              : 'Correction demandée'}
-                          </span>
-                        ) : (
-                          <button
-                            type="button"
-                            onClick={() => {
-                              setSelectedActivity(op);
-                              setReason('');
-                              setFormError(null);
-                            }}
-                            className="inline-flex items-center gap-1 text-xs font-medium text-[#7624A8] dark:text-[#D896FF] hover:underline cursor-pointer"
-                          >
-                            <MessageSquareWarning className="w-3.5 h-3.5" aria-hidden="true" />
-                            <span>Demander correction</span>
-                          </button>
-                        )}
+                                ? 'Correction refusée'
+                                : 'Correction demandée'}
+                            </span>
+                          ) : (
+                            <button
+                              type="button"
+                              onClick={() => {
+                                setSelectedActivity(op);
+                                setReason('');
+                                setFormError(null);
+                              }}
+                              className="inline-flex items-center gap-1 text-xs font-medium text-[#7624A8] dark:text-[#D896FF] hover:underline cursor-pointer"
+                            >
+                              <MessageSquareWarning className="w-3.5 h-3.5" aria-hidden="true" />
+                              <span>Demander correction</span>
+                            </button>
+                          )}
+                        </div>
                       </td>
                     </tr>
                   );
@@ -468,10 +494,15 @@ export function EmployeeHistoryView({
             </div>
             <div className="text-xs text-slate-600 dark:text-[#C8C2D0] bg-slate-50 dark:bg-[#211E27] border border-slate-200 dark:border-[#393342] rounded-lg p-3">
               <div className="font-semibold text-slate-900 dark:text-white">
-                {selectedActivity.taskTitle}
+                {selectedActivity.taskTitle || selectedActivity.projectName || 'Traitement'}
               </div>
               <div className="font-mono mt-0.5">
-                {selectedActivity.dossierRef} · {formatTimeShort(selectedActivity.startedAt)} –{' '}
+                {selectedActivity.dossierRef
+                  ? `${selectedActivity.dossierRef} · `
+                  : selectedActivity.formVersionNumber
+                  ? `v${selectedActivity.formVersionNumber} · `
+                  : ''}
+                {formatTimeShort(selectedActivity.startedAt)} –{' '}
                 {formatTimeShort(selectedActivity.endedAt)}
               </div>
             </div>
@@ -510,6 +541,69 @@ export function EmployeeHistoryView({
               </button>
             </div>
           </form>
+        </div>
+      )}
+      {detailActivity && (
+        <div className="fixed inset-0 z-50 flex items-center justify-center p-4">
+          <div
+            className="fixed inset-0 bg-slate-900/50 dark:bg-black/70"
+            onClick={() => setDetailActivity(null)}
+            aria-hidden="true"
+          />
+          <div className="relative bg-white dark:bg-[#292631] border border-slate-200 dark:border-[#393342] rounded-xl max-w-lg w-full p-6 space-y-4 shadow-xl z-10 max-h-[85vh] overflow-y-auto">
+            <div className="flex items-start justify-between border-b border-slate-200 dark:border-[#393342] pb-3">
+              <div>
+                <h3 className="text-base font-bold text-slate-900 dark:text-white">
+                  Réponses du formulaire
+                  {detailActivity.dossierRef ? (
+                    <>
+                      {' '}
+                      · <span className="font-mono">{detailActivity.dossierRef}</span>
+                    </>
+                  ) : null}
+                </h3>
+                <div className="text-xs text-[#7624A8] dark:text-[#D896FF] mt-0.5 font-medium">
+                  {detailActivity.projectName ?? 'Traitement'}
+                  {detailActivity.formVersionNumber
+                    ? ` (version v${detailActivity.formVersionNumber} conservée)`
+                    : ''}
+                </div>
+              </div>
+              <button
+                type="button"
+                onClick={() => setDetailActivity(null)}
+                className="p-1.5 rounded-lg text-slate-400 dark:text-[#C8C2D0] hover:text-slate-700 dark:hover:text-white cursor-pointer"
+                aria-label="Fermer"
+              >
+                <X className="w-4 h-4" />
+              </button>
+            </div>
+            <div className="divide-y divide-slate-100 dark:divide-[#393342] text-xs">
+              {(detailActivity.formFieldsSnapshot ?? [])
+                .slice()
+                .sort((a, b) => a.order - b.order)
+                .map((field) => {
+                  const val = detailActivity.customResponses?.[field.id];
+                  const formatted = Array.isArray(val)
+                    ? val.length > 0
+                      ? val.join(', ')
+                      : '—'
+                    : val && String(val).trim() !== ''
+                    ? String(val)
+                    : '—';
+                  return (
+                    <div key={field.id} className="py-2.5 flex items-start justify-between gap-4">
+                      <span className="font-medium text-slate-600 dark:text-[#C8C2D0]">
+                        {field.label}
+                      </span>
+                      <span className="font-semibold text-slate-900 dark:text-white text-right">
+                        {formatted}
+                      </span>
+                    </div>
+                  );
+                })}
+            </div>
+          </div>
         </div>
       )}
     </div>

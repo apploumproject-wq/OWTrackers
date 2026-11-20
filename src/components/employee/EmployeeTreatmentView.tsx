@@ -1,12 +1,12 @@
 import React, { useMemo, useState } from 'react';
-import { Play, Square, CheckCircle2, AlertCircle, Lock } from 'lucide-react';
+import { Play, Square, CheckCircle2, AlertCircle, Lock, FolderKanban } from 'lucide-react';
 import {
   ActivityRecord,
-  CompanyRecord,
+  CustomFieldValue,
   EmployeeShiftState,
   NavModuleId,
-  ReceptionChannel,
-  TaskRecord,
+  ProjectFormField,
+  ProjectRecord,
 } from '../../core/types';
 import { formatDurationHMS, formatTimeWithSeconds } from '../../utils/formatters';
 import { SectionHeader } from '../ui/DataPrimitives';
@@ -14,22 +14,12 @@ import { SectionHeader } from '../ui/DataPrimitives';
 interface EmployeeTreatmentViewProps {
   shiftState: EmployeeShiftState;
   nowMs: number;
-  companies: CompanyRecord[];
-  tasks: TaskRecord[];
-  companyTaskMap: Record<string, string[]>;
+  projects: ProjectRecord[];
+  allProjectsCount: number;
   lastSavedActivity: ActivityRecord | null;
-  onStartTreatment: () => string | null;
+  onStartTreatment: (projectId?: string) => string | null;
   onUpdateTimerFields: (patch: {
-    taskId?: string;
-    taskTitle?: string;
-    companyId?: string;
-    clientName?: string;
-    receptionChannel?: ReceptionChannel;
-    receptionDateTime?: string;
-    recipientEmail?: string;
-    teamsRequesterName?: string;
-    dossierRef?: string;
-    notes?: string;
+    customResponses?: Record<string, CustomFieldValue>;
   }) => void;
   onCompleteTimer: () => string[] | null;
   onNavigate: (moduleId: NavModuleId) => void;
@@ -38,15 +28,17 @@ interface EmployeeTreatmentViewProps {
 export function EmployeeTreatmentView({
   shiftState,
   nowMs,
-  companies,
-  tasks,
-  companyTaskMap,
+  projects,
+  allProjectsCount,
   lastSavedActivity,
   onStartTreatment,
   onUpdateTimerFields,
   onCompleteTimer,
   onNavigate,
 }: EmployeeTreatmentViewProps) {
+  const [selectedProjectId, setSelectedProjectId] = useState<string>(
+    () => projects[0]?.id ?? ''
+  );
   const [startError, setStartError] = useState<string | null>(null);
   const [validationErrors, setValidationErrors] = useState<string[]>([]);
 
@@ -54,24 +46,57 @@ export function EmployeeTreatmentView({
   const isTreatmentActive = activeTimer?.type === 'traitement';
   const isOtherActivityActive = Boolean(activeTimer && activeTimer.type !== 'traitement');
 
-  const activeCompanies = useMemo(() => companies.filter((c) => !c.archived), [companies]);
-  const activeTasks = useMemo(() => tasks.filter((t) => !t.archived), [tasks]);
+  const effectiveSelectedProject = useMemo(() => {
+    if (projects.length === 0) return null;
+    return projects.find((p) => p.id === selectedProjectId) ?? projects[0];
+  }, [projects, selectedProjectId]);
 
-  const availableTasksForSelectedCompany = useMemo(() => {
-    if (!activeTimer?.companyId) return activeTasks;
-    const allowedIds = companyTaskMap[activeTimer.companyId];
-    if (!allowedIds) return activeTasks;
-    return activeTasks.filter((t) => allowedIds.includes(t.id));
-  }, [activeTimer?.companyId, activeTasks, companyTaskMap]);
+  const previewFormVersion = useMemo(() => {
+    if (!effectiveSelectedProject || !effectiveSelectedProject.formVersions?.length) return null;
+    return (
+      effectiveSelectedProject.formVersions.find(
+        (v) => v.id === effectiveSelectedProject.currentFormVersionId
+      ) ??
+      effectiveSelectedProject.formVersions[effectiveSelectedProject.formVersions.length - 1] ??
+      null
+    );
+  }, [effectiveSelectedProject]);
+
+  const previewActiveFields = useMemo(() => {
+    if (!previewFormVersion) return [];
+    return [...previewFormVersion.fields]
+      .filter((f) => f.active)
+      .sort((a, b) => a.order - b.order);
+  }, [previewFormVersion]);
+
+  const activeCustomFields = useMemo(() => {
+    if (!activeTimer?.formFieldsSnapshot) return [];
+    return [...activeTimer.formFieldsSnapshot]
+      .filter((f) => f.active)
+      .sort((a, b) => a.order - b.order);
+  }, [activeTimer?.formFieldsSnapshot]);
 
   const elapsedSeconds =
     isTreatmentActive && activeTimer
       ? Math.max(0, Math.round((nowMs - new Date(activeTimer.startedAt).getTime()) / 1000))
       : 0;
 
+  const noProjectsConfigured = allProjectsCount === 0;
+  const noAssignedProjectBlocked = allProjectsCount > 0 && projects.length === 0;
+  const hasNoPublishedForm =
+    Boolean(effectiveSelectedProject) &&
+    (!previewFormVersion || previewActiveFields.length === 0);
+
+  const canStartTreatment =
+    !isOtherActivityActive &&
+    !noProjectsConfigured &&
+    !noAssignedProjectBlocked &&
+    Boolean(effectiveSelectedProject) &&
+    !hasNoPublishedForm;
+
   const handleStartClick = () => {
     setValidationErrors([]);
-    const err = onStartTreatment();
+    const err = onStartTreatment(effectiveSelectedProject?.id);
     setStartError(err);
   };
 
@@ -84,29 +109,33 @@ export function EmployeeTreatmentView({
     }
   };
 
-  const handleCompanyChange = (companyId: string) => {
-    const comp = activeCompanies.find((c) => c.id === companyId);
-    const allowedIds = companyTaskMap[companyId];
-    const currentTaskStillAllowed =
-      !activeTimer?.taskId || !allowedIds || allowedIds.includes(activeTimer.taskId);
-
+  const handleCustomFieldChange = (fieldId: string, value: CustomFieldValue) => {
     onUpdateTimerFields({
-      companyId,
-      clientName: comp?.name ?? '',
-      ...(currentTaskStillAllowed ? {} : { taskId: '', taskTitle: '' }),
+      customResponses: {
+        [fieldId]: value,
+      },
     });
   };
 
-  const handleTaskChange = (taskId: string) => {
-    const task = availableTasksForSelectedCompany.find((t) => t.id === taskId);
-    onUpdateTimerFields({
-      taskId,
-      taskTitle: task?.name ?? '',
-    });
+  const handleCheckboxToggle = (field: ProjectFormField, optionValue: string, checked: boolean) => {
+    const currentRaw = activeTimer?.customResponses?.[field.id];
+    const currentArr = Array.isArray(currentRaw) ? [...currentRaw] : [];
+    const nextArr = checked
+      ? Array.from(new Set([...currentArr, optionValue]))
+      : currentArr.filter((v) => v !== optionValue);
+    handleCustomFieldChange(field.id, nextArr);
   };
 
   const inputClass =
-    'w-full px-3 py-2 text-sm bg-white dark:bg-[#211E27] text-slate-900 dark:text-white border border-slate-300 dark:border-[#393342] rounded-lg focus:outline-none focus:border-[#A83CE2] placeholder:text-slate-400 dark:placeholder:text-[#C8C2D0]/50';
+    'w-full px-3 py-2 text-sm bg-white dark:bg-[#211E27] text-slate-900 dark:text-white border border-slate-300 dark:border-[#393342] rounded-lg focus:outline-none focus:border-[#A83CE2] placeholder:text-slate-400 dark:placeholder:text-[#C8C2D0]/50 disabled:opacity-60 disabled:cursor-not-allowed';
+
+  const displayedFields = isTreatmentActive ? activeCustomFields : previewActiveFields;
+  const displayedProjectName = isTreatmentActive
+    ? activeTimer?.projectName ?? ''
+    : effectiveSelectedProject?.name ?? '';
+  const displayedFormVersionNumber = isTreatmentActive
+    ? activeTimer?.formVersionNumber ?? 1
+    : previewFormVersion?.versionNumber ?? effectiveSelectedProject?.currentFormVersionNumber ?? 1;
 
   return (
     <div className="space-y-6">
@@ -115,7 +144,10 @@ export function EmployeeTreatmentView({
       {isOtherActivityActive && activeTimer && (
         <div className="bg-amber-50 dark:bg-amber-950/40 border border-amber-200 dark:border-amber-800/60 rounded-lg p-4 flex flex-col sm:flex-row sm:items-center sm:justify-between gap-3">
           <div className="flex items-start gap-2.5 text-xs text-amber-900 dark:text-amber-200">
-            <Lock className="w-4 h-4 text-amber-700 dark:text-amber-400 shrink-0 mt-0.5" aria-hidden="true" />
+            <Lock
+              className="w-4 h-4 text-amber-700 dark:text-amber-400 shrink-0 mt-0.5"
+              aria-hidden="true"
+            />
             <span>
               Chronomètre actif : {activeTimer.taskTitle} (depuis{' '}
               {formatTimeWithSeconds(activeTimer.startedAt)}).
@@ -136,9 +168,88 @@ export function EmployeeTreatmentView({
           role="alert"
           className="bg-red-50 dark:bg-red-950/40 border border-red-200 dark:border-red-800/60 rounded-lg px-4 py-3 text-xs text-red-800 dark:text-red-200 flex items-center gap-2"
         >
-          <AlertCircle className="w-4 h-4 text-red-600 dark:text-red-400 shrink-0" aria-hidden="true" />
+          <AlertCircle
+            className="w-4 h-4 text-red-600 dark:text-red-400 shrink-0"
+            aria-hidden="true"
+          />
           <span>{startError}</span>
         </div>
+      )}
+
+      {/* Sélection du projet avant le démarrage */}
+      {!isTreatmentActive && (
+        <section className="bg-white dark:bg-[#292631] border border-slate-200 dark:border-[#393342] rounded-lg p-5 space-y-4">
+          <div className="flex items-center gap-2">
+            <FolderKanban className="w-4 h-4 text-[#A83CE2] shrink-0" aria-hidden="true" />
+            <h2 className="text-sm font-semibold text-slate-900 dark:text-white">
+              Sélection du projet de traitement
+            </h2>
+          </div>
+
+          {noProjectsConfigured ? (
+            <div className="text-xs text-amber-800 dark:text-amber-300 bg-amber-50 dark:bg-amber-950/40 border border-amber-200 dark:border-amber-800/60 rounded-lg p-3.5">
+              Aucun projet n’est encore configuré dans l’application. Contactez votre manager ou administrateur.
+            </div>
+          ) : noAssignedProjectBlocked ? (
+            <div className="text-xs text-amber-800 dark:text-amber-300 bg-amber-50 dark:bg-amber-950/40 border border-amber-200 dark:border-amber-800/60 rounded-lg p-3.5">
+              Aucun projet actif ne vous est actuellement affecté. Contactez votre manager ou superviseur.
+            </div>
+          ) : (
+            <div className="grid grid-cols-1 lg:grid-cols-12 gap-4 items-start">
+              <div className="lg:col-span-5">
+                <label
+                  htmlFor="trt-project-select"
+                  className="block text-xs font-medium text-slate-700 dark:text-[#C8C2D0] mb-1.5"
+                >
+                  Projet affecté <span className="text-red-600 dark:text-red-400">*</span>
+                </label>
+                <select
+                  id="trt-project-select"
+                  disabled={isOtherActivityActive}
+                  value={effectiveSelectedProject?.id ?? ''}
+                  onChange={(e) => {
+                    setSelectedProjectId(e.target.value);
+                    setStartError(null);
+                  }}
+                  className={inputClass}
+                >
+                  {projects.map((p) => (
+                    <option key={p.id} value={p.id}>
+                      {p.code} — {p.name}
+                    </option>
+                  ))}
+                </select>
+                {effectiveSelectedProject?.description && (
+                  <p className="text-xs text-slate-500 dark:text-[#C8C2D0] mt-2">
+                    {effectiveSelectedProject.description}
+                  </p>
+                )}
+              </div>
+
+              {effectiveSelectedProject && (
+                <div className="lg:col-span-7 bg-slate-50 dark:bg-[#211E27] border border-slate-200 dark:border-[#393342] rounded-lg p-3.5 text-xs space-y-1.5">
+                  <div className="flex flex-wrap items-center justify-between gap-2">
+                    <span className="font-semibold text-slate-900 dark:text-white">
+                      Formulaire du projet : {effectiveSelectedProject.name}
+                    </span>
+                    <span className="font-mono font-semibold text-[#7624A8] dark:text-[#D896FF]">
+                      v{displayedFormVersionNumber} · {previewActiveFields.length} champ(s)
+                    </span>
+                  </div>
+                  {hasNoPublishedForm ? (
+                    <div className="text-amber-800 dark:text-amber-300 font-medium">
+                      Aucun formulaire publié actif n’est configuré pour ce projet.
+                    </div>
+                  ) : (
+                    <div className="text-slate-600 dark:text-[#C8C2D0]">
+                      Le formulaire ci-dessous s’adapte automatiquement au projet sélectionné. Démarrez le chronomètre pour le renseigner.
+                    </div>
+                  )}
+                </div>
+              )}
+            </div>
+          )}
+        </section>
       )}
 
       <section className="bg-white dark:bg-[#292631] border border-slate-200 dark:border-[#393342] rounded-lg p-6 space-y-6">
@@ -151,7 +262,15 @@ export function EmployeeTreatmentView({
                   : 'text-slate-500 dark:text-[#C8C2D0]'
               }`}
             >
-              {isTreatmentActive ? 'Traitement en cours' : 'Prêt'}
+              {isTreatmentActive
+                ? activeTimer?.projectName
+                  ? `Traitement en cours · ${activeTimer.projectName} (v${
+                      activeTimer.formVersionNumber ?? 1
+                    })`
+                  : 'Traitement en cours'
+                : effectiveSelectedProject
+                ? `Prêt · ${effectiveSelectedProject.name}`
+                : 'Prêt'}
             </div>
             <div
               className={`mt-1 text-4xl font-bold font-mono tabular-nums tracking-tight ${
@@ -174,10 +293,10 @@ export function EmployeeTreatmentView({
             {!isTreatmentActive ? (
               <button
                 type="button"
-                disabled={isOtherActivityActive}
+                disabled={!canStartTreatment}
                 onClick={handleStartClick}
                 className={`inline-flex items-center gap-2 px-5 py-2.5 text-sm font-semibold rounded-lg transition-colors whitespace-nowrap ${
-                  isOtherActivityActive
+                  !canStartTreatment
                     ? 'bg-slate-200 dark:bg-[#211E27] text-slate-400 dark:text-[#C8C2D0]/50 cursor-not-allowed'
                     : 'bg-[#A83CE2] hover:bg-[#7624A8] text-white cursor-pointer'
                 }`}
@@ -204,8 +323,11 @@ export function EmployeeTreatmentView({
             className="bg-red-50 dark:bg-red-950/40 border border-red-200 dark:border-red-800/60 rounded-lg p-4 space-y-1.5"
           >
             <div className="flex items-center gap-2 text-xs font-semibold text-red-800 dark:text-red-200">
-              <AlertCircle className="w-4 h-4 text-red-600 dark:text-red-400 shrink-0" aria-hidden="true" />
-              <span>Champs obligatoires manquants :</span>
+              <AlertCircle
+                className="w-4 h-4 text-red-600 dark:text-red-400 shrink-0"
+                aria-hidden="true"
+              />
+              <span>Champs obligatoires manquants ou invalides :</span>
             </div>
             <ul className="list-disc list-inside text-xs text-red-700 dark:text-red-300 space-y-0.5 pl-1">
               {validationErrors.map((err) => (
@@ -215,160 +337,236 @@ export function EmployeeTreatmentView({
           </div>
         )}
 
-        {isTreatmentActive && activeTimer && (
-          <div className="grid grid-cols-1 md:grid-cols-2 gap-4">
-            <div>
-              <label
-                htmlFor="trt-client"
-                className="block text-xs font-medium text-slate-700 dark:text-[#C8C2D0] mb-1.5"
-              >
-                Entreprise cliente <span className="text-red-600 dark:text-red-400">*</span>
-              </label>
-              <select
-                id="trt-client"
-                value={activeTimer.companyId ?? ''}
-                onChange={(e) => handleCompanyChange(e.target.value)}
-                className={inputClass}
-              >
-                <option value="">Sélectionner une société...</option>
-                {activeCompanies.map((c) => (
-                  <option key={c.id} value={c.id}>
-                    {c.name}
-                  </option>
-                ))}
-              </select>
-            </div>
-
-            <div>
-              <label
-                htmlFor="trt-task"
-                className="block text-xs font-medium text-slate-700 dark:text-[#C8C2D0] mb-1.5"
-              >
-                Type de tâche <span className="text-red-600 dark:text-red-400">*</span>
-              </label>
-              <select
-                id="trt-task"
-                value={activeTimer.taskId ?? ''}
-                onChange={(e) => handleTaskChange(e.target.value)}
-                className={inputClass}
-              >
-                <option value="">Sélectionner une tâche...</option>
-                {availableTasksForSelectedCompany.map((t) => (
-                  <option key={t.id} value={t.id}>
-                    {t.name}
-                  </option>
-                ))}
-              </select>
-            </div>
-
-            <div>
-              <span className="block text-xs font-medium text-slate-700 dark:text-[#C8C2D0] mb-1.5">
-                Canal de réception <span className="text-red-600 dark:text-red-400">*</span>
-              </span>
-              <div className="flex items-center gap-2">
-                {(['Mail', 'Teams'] as const).map((channel) => {
-                  const selected = activeTimer.receptionChannel === channel;
-                  return (
-                    <button
-                      key={channel}
-                      type="button"
-                      onClick={() => onUpdateTimerFields({ receptionChannel: channel })}
-                      className={`flex-1 py-2 px-3 text-sm font-medium rounded-lg border transition-colors cursor-pointer ${
-                        selected
-                          ? 'border-[#A83CE2] bg-[#F7EEFC] dark:bg-[#A83CE2]/20 text-[#7624A8] dark:text-white'
-                          : 'border-slate-300 dark:border-[#393342] bg-white dark:bg-[#211E27] text-slate-700 dark:text-[#C8C2D0] hover:bg-slate-50 dark:hover:bg-[#332C40]'
-                      }`}
-                    >
-                      {channel}
-                    </button>
-                  );
-                })}
+        {/* Formulaire dynamique exclusivement lié au projet sélectionné */}
+        {(isTreatmentActive || effectiveSelectedProject) && (
+          <div className="space-y-4">
+            {displayedFields.length === 0 ? (
+              <div className="bg-amber-50 dark:bg-amber-950/40 border border-amber-200 dark:border-amber-800/60 rounded-lg p-4 text-xs text-amber-900 dark:text-amber-200 flex items-start gap-2.5">
+                <AlertCircle
+                  className="w-4 h-4 text-amber-700 dark:text-amber-400 shrink-0 mt-0.5"
+                  aria-hidden="true"
+                />
+                <span>
+                  Ce projet ne possède pas encore de formulaire publié actif. Veuillez contacter votre manager ou administrateur pour publier ses champs avant d’effectuer un traitement.
+                </span>
               </div>
-            </div>
+            ) : (
+              <>
+                <div className="flex flex-wrap items-center justify-between gap-2">
+                  <h3 className="text-sm font-semibold text-[#7624A8] dark:text-[#D896FF]">
+                    Formulaire du projet — {displayedProjectName} (v{displayedFormVersionNumber})
+                  </h3>
+                  <span className="text-xs text-slate-500 dark:text-[#C8C2D0]">
+                    {displayedFields.length} champ(s){' '}
+                    {!isTreatmentActive ? '· Aperçu avant démarrage' : ''}
+                  </span>
+                </div>
 
-            <div>
-              <label
-                htmlFor="trt-rec-dt"
-                className="block text-xs font-medium text-slate-700 dark:text-[#C8C2D0] mb-1.5"
-              >
-                Date et heure de réception <span className="text-red-600 dark:text-red-400">*</span>
-              </label>
-              <input
-                id="trt-rec-dt"
-                type="datetime-local"
-                value={activeTimer.receptionDateTime ?? ''}
-                onChange={(e) => onUpdateTimerFields({ receptionDateTime: e.target.value })}
-                className={`${inputClass} font-mono`}
-              />
-            </div>
+                <div className="grid grid-cols-1 md:grid-cols-2 gap-4">
+                  {displayedFields.map((field) => {
+                    const rawVal = isTreatmentActive
+                      ? activeTimer?.customResponses?.[field.id]
+                      : undefined;
+                    const strVal = typeof rawVal === 'string' ? rawVal : '';
+                    const arrVal = Array.isArray(rawVal) ? rawVal : [];
+                    const fullSpan =
+                      field.type === 'long_text' ||
+                      field.type === 'checkbox' ||
+                      field.type === 'radio';
+                    const isReadOnlyPreview = !isTreatmentActive;
 
-            <div>
-              <label
-                htmlFor="trt-email"
-                className="block text-xs font-medium text-slate-700 dark:text-[#C8C2D0] mb-1.5"
-              >
-                E-mail destinataire
-              </label>
-              <input
-                id="trt-email"
-                type="email"
-                value={activeTimer.recipientEmail ?? ''}
-                onChange={(e) => onUpdateTimerFields({ recipientEmail: e.target.value })}
-                placeholder="facultatif"
-                className={inputClass}
-              />
-            </div>
+                    return (
+                      <div key={field.id} className={fullSpan ? 'md:col-span-2' : ''}>
+                        <label
+                          htmlFor={`custom-${field.id}`}
+                          className="block text-xs font-medium text-slate-700 dark:text-[#C8C2D0] mb-1.5"
+                        >
+                          {field.label}{' '}
+                          {field.required && (
+                            <span className="text-red-600 dark:text-red-400">*</span>
+                          )}
+                        </label>
 
-            <div>
-              <label
-                htmlFor="trt-teams"
-                className="block text-xs font-medium text-slate-700 dark:text-[#C8C2D0] mb-1.5"
-              >
-                Demandeur Teams
-              </label>
-              <input
-                id="trt-teams"
-                type="text"
-                value={activeTimer.teamsRequesterName ?? ''}
-                onChange={(e) => onUpdateTimerFields({ teamsRequesterName: e.target.value })}
-                placeholder="facultatif"
-                className={inputClass}
-              />
-            </div>
+                        {field.type === 'short_text' && (
+                          <input
+                            id={`custom-${field.id}`}
+                            type="text"
+                            disabled={isReadOnlyPreview}
+                            value={strVal}
+                            onChange={(e) => handleCustomFieldChange(field.id, e.target.value)}
+                            className={inputClass}
+                          />
+                        )}
 
-            <div>
-              <label
-                htmlFor="trt-ref"
-                className="block text-xs font-medium text-slate-700 dark:text-[#C8C2D0] mb-1.5"
-              >
-                Référence du dossier <span className="text-red-600 dark:text-red-400">*</span>
-              </label>
-              <input
-                id="trt-ref"
-                type="text"
-                value={activeTimer.dossierRef ?? ''}
-                onChange={(e) => onUpdateTimerFields({ dossierRef: e.target.value })}
-                placeholder="Ex. COV-2026-4420"
-                className={`${inputClass} font-mono`}
-              />
-            </div>
+                        {field.type === 'long_text' && (
+                          <textarea
+                            id={`custom-${field.id}`}
+                            rows={3}
+                            disabled={isReadOnlyPreview}
+                            value={strVal}
+                            onChange={(e) => handleCustomFieldChange(field.id, e.target.value)}
+                            className={inputClass}
+                          />
+                        )}
 
-            <div>
-              <label
-                htmlFor="trt-notes"
-                className="block text-xs font-medium text-slate-700 dark:text-[#C8C2D0] mb-1.5"
-              >
-                Commentaire
-              </label>
-              <input
-                id="trt-notes"
-                type="text"
-                value={activeTimer.notes}
-                onChange={(e) => onUpdateTimerFields({ notes: e.target.value })}
-                placeholder="facultatif"
-                className={inputClass}
-              />
-            </div>
+                        {field.type === 'number' && (
+                          <input
+                            id={`custom-${field.id}`}
+                            type="number"
+                            step="any"
+                            disabled={isReadOnlyPreview}
+                            value={strVal}
+                            onChange={(e) => handleCustomFieldChange(field.id, e.target.value)}
+                            className={`${inputClass} font-mono`}
+                          />
+                        )}
+
+                        {field.type === 'date' && (
+                          <input
+                            id={`custom-${field.id}`}
+                            type="date"
+                            disabled={isReadOnlyPreview}
+                            value={strVal}
+                            onChange={(e) => handleCustomFieldChange(field.id, e.target.value)}
+                            className={`${inputClass} font-mono`}
+                          />
+                        )}
+
+                        {field.type === 'time' && (
+                          <input
+                            id={`custom-${field.id}`}
+                            type="time"
+                            disabled={isReadOnlyPreview}
+                            value={strVal}
+                            onChange={(e) => handleCustomFieldChange(field.id, e.target.value)}
+                            className={`${inputClass} font-mono`}
+                          />
+                        )}
+
+                        {field.type === 'email' && (
+                          <input
+                            id={`custom-${field.id}`}
+                            type="email"
+                            disabled={isReadOnlyPreview}
+                            value={strVal}
+                            onChange={(e) => handleCustomFieldChange(field.id, e.target.value)}
+                            placeholder="exemple@domaine.fr"
+                            className={inputClass}
+                          />
+                        )}
+
+                        {field.type === 'select' && (
+                          <select
+                            id={`custom-${field.id}`}
+                            disabled={isReadOnlyPreview}
+                            value={strVal}
+                            onChange={(e) => handleCustomFieldChange(field.id, e.target.value)}
+                            className={inputClass}
+                          >
+                            <option value="">Sélectionner...</option>
+                            {(field.options ?? []).map((opt) => (
+                              <option key={opt} value={opt}>
+                                {opt}
+                              </option>
+                            ))}
+                          </select>
+                        )}
+
+                        {field.type === 'radio' && (
+                          <div className="flex flex-wrap gap-2 pt-0.5">
+                            {(field.options ?? []).map((opt) => {
+                              const checked = strVal === opt;
+                              return (
+                                <label
+                                  key={opt}
+                                  className={`inline-flex items-center gap-2 px-3 py-2 rounded-lg border text-xs ${
+                                    isReadOnlyPreview
+                                      ? 'opacity-60 cursor-not-allowed'
+                                      : 'cursor-pointer'
+                                  } ${
+                                    checked
+                                      ? 'border-[#A83CE2] bg-[#F7EEFC] dark:bg-[#A83CE2]/20 text-[#7624A8] dark:text-white font-semibold'
+                                      : 'border-slate-300 dark:border-[#393342] bg-white dark:bg-[#211E27] text-slate-700 dark:text-[#C8C2D0]'
+                                  }`}
+                                >
+                                  <input
+                                    type="radio"
+                                    disabled={isReadOnlyPreview}
+                                    name={`custom-radio-${field.id}`}
+                                    checked={checked}
+                                    onChange={() => handleCustomFieldChange(field.id, opt)}
+                                    className="accent-[#A83CE2]"
+                                  />
+                                  <span>{opt}</span>
+                                </label>
+                              );
+                            })}
+                          </div>
+                        )}
+
+                        {field.type === 'checkbox' && (
+                          <div className="flex flex-wrap gap-2 pt-0.5">
+                            {(field.options ?? []).length > 0 ? (
+                              (field.options ?? []).map((opt) => {
+                                const checked = arrVal.includes(opt);
+                                return (
+                                  <label
+                                    key={opt}
+                                    className={`inline-flex items-center gap-2 px-3 py-2 rounded-lg border text-xs ${
+                                      isReadOnlyPreview
+                                        ? 'opacity-60 cursor-not-allowed'
+                                        : 'cursor-pointer'
+                                    } ${
+                                      checked
+                                        ? 'border-[#A83CE2] bg-[#F7EEFC] dark:bg-[#A83CE2]/20 text-[#7624A8] dark:text-white font-semibold'
+                                        : 'border-slate-300 dark:border-[#393342] bg-white dark:bg-[#211E27] text-slate-700 dark:text-[#C8C2D0]'
+                                    }`}
+                                  >
+                                    <input
+                                      type="checkbox"
+                                      disabled={isReadOnlyPreview}
+                                      checked={checked}
+                                      onChange={(e) =>
+                                        handleCheckboxToggle(field, opt, e.target.checked)
+                                      }
+                                      className="accent-[#A83CE2]"
+                                    />
+                                    <span>{opt}</span>
+                                  </label>
+                                );
+                              })
+                            ) : (
+                              <label
+                                className={`inline-flex items-center gap-2 px-3 py-2 rounded-lg border text-xs ${
+                                  isReadOnlyPreview
+                                    ? 'opacity-60 cursor-not-allowed'
+                                    : 'cursor-pointer'
+                                } ${
+                                  arrVal.includes('Oui')
+                                    ? 'border-[#A83CE2] bg-[#F7EEFC] dark:bg-[#A83CE2]/20 text-[#7624A8] dark:text-white font-semibold'
+                                    : 'border-slate-300 dark:border-[#393342] bg-white dark:bg-[#211E27] text-slate-700 dark:text-[#C8C2D0]'
+                                }`}
+                              >
+                                <input
+                                  type="checkbox"
+                                  disabled={isReadOnlyPreview}
+                                  checked={arrVal.includes('Oui')}
+                                  onChange={(e) =>
+                                    handleCheckboxToggle(field, 'Oui', e.target.checked)
+                                  }
+                                  className="accent-[#A83CE2]"
+                                />
+                                <span>Oui / Confirmé</span>
+                              </label>
+                            )}
+                          </div>
+                        )}
+                      </div>
+                    );
+                  })}
+                </div>
+              </>
+            )}
           </div>
         )}
 
@@ -376,8 +574,19 @@ export function EmployeeTreatmentView({
           <div className="flex items-center gap-2.5 text-xs text-[#7624A8] dark:text-[#D896FF] bg-[#F7EEFC] dark:bg-[#A83CE2]/15 border border-[#A83CE2]/25 dark:border-[#A83CE2]/40 rounded-lg px-4 py-3">
             <CheckCircle2 className="w-4 h-4 text-[#A83CE2] shrink-0" aria-hidden="true" />
             <span>
-              Enregistré : <strong>{lastSavedActivity.clientName}</strong> ·{' '}
-              {lastSavedActivity.taskTitle} ({lastSavedActivity.dossierRef}) —{' '}
+              Enregistré :{' '}
+              {lastSavedActivity.projectName ? (
+                <strong>
+                  {lastSavedActivity.projectName} (v{lastSavedActivity.formVersionNumber ?? 1})
+                </strong>
+              ) : (
+                <strong>
+                  {[lastSavedActivity.clientName, lastSavedActivity.taskTitle]
+                    .filter(Boolean)
+                    .join(' · ')}
+                </strong>
+              )}{' '}
+              {lastSavedActivity.dossierRef ? `(${lastSavedActivity.dossierRef}) ` : ''}—{' '}
               {formatDurationHMS(lastSavedActivity.durationSeconds)}
             </span>
           </div>

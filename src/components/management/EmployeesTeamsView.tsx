@@ -8,6 +8,7 @@ import {
   Eye,
   EyeOff,
   FileSpreadsheet,
+  FolderKanban,
   Plus,
   Search,
   Upload,
@@ -22,6 +23,7 @@ import {
   CompanyRecord,
   CorrectionRequest,
   ManagedEmployee,
+  ProjectRecord,
   QualityControlRecord,
   TeamRecord,
   UserRole,
@@ -53,6 +55,7 @@ interface EmployeesTeamsViewProps {
   employees: ManagedEmployee[];
   teams: TeamRecord[];
   companies: CompanyRecord[];
+  projects: ProjectRecord[];
   correctionRequests: CorrectionRequest[];
   qualityControls: QualityControlRecord[];
   onCreateAccount: (input: CreateUserInput) => Promise<{
@@ -84,7 +87,7 @@ interface EmployeesTeamsViewProps {
         | 'accountStatus'
       >
     >,
-    options?: { newPassword?: string; reason?: string }
+    options?: { newPassword?: string; reason?: string; assignedProjectIds?: string[] }
   ) => Promise<{ error?: string }>;
   onSetAccountStatus: (
     employeeId: string,
@@ -122,6 +125,8 @@ interface AccountFormState {
   accountStatus: AccountStatus;
   password: string;
   confirmPassword: string;
+  selectedProjectIds: string[];
+  manuallyToggledProjectIds: Record<string, boolean>;
 }
 
 export function EmployeesTeamsView({
@@ -130,6 +135,7 @@ export function EmployeesTeamsView({
   employees,
   teams,
   companies,
+  projects,
   correctionRequests,
   qualityControls,
   onCreateAccount,
@@ -174,6 +180,15 @@ export function EmployeesTeamsView({
 
   const isSupervisor = user.role === 'supervisor';
   const isAdmin = user.role === 'admin';
+  const canAssignProjects = user.role === 'admin' || user.role === 'manager';
+
+  const activeAssignableProjects = useMemo(
+    () =>
+      projects
+        .filter((p) => p.active)
+        .sort((a, b) => a.name.localeCompare(b.name, 'fr')),
+    [projects]
+  );
 
   // Liste dynamique des encadrants pouvant superviser une équipe ou un employé
   const supervisorCandidates = useMemo(() => {
@@ -233,8 +248,22 @@ export function EmployeesTeamsView({
     }
   };
 
+  const computeProjectsForTeamChange = (
+    teamId: string,
+    overrides: Record<string, boolean>
+  ): string[] =>
+    activeAssignableProjects
+      .filter((p) => {
+        if (Object.prototype.hasOwnProperty.call(overrides, p.id)) {
+          return overrides[p.id];
+        }
+        return Boolean(teamId && p.assignedTeamIds.includes(teamId));
+      })
+      .map((p) => p.id);
+
   const openNewAccountForm = () => {
     const defaultTeam = teams[0];
+    const defaultTeamId = defaultTeam?.id ?? '';
     setFormError(null);
     setShowPassword(false);
     setAccountForm({
@@ -245,7 +274,7 @@ export function EmployeesTeamsView({
       role: 'employee',
       jobTitle: '',
       site: defaultTeam?.site ?? 'Siège',
-      teamId: defaultTeam?.id ?? '',
+      teamId: defaultTeamId,
       supervisorId: defaultTeam?.supervisorId ?? '',
       plannedStart: '08:30',
       plannedEnd: '17:00',
@@ -254,12 +283,26 @@ export function EmployeesTeamsView({
       accountStatus: 'actif',
       password: '',
       confirmPassword: '',
+      selectedProjectIds: computeProjectsForTeamChange(defaultTeamId, {}),
+      manuallyToggledProjectIds: {},
     });
   };
 
   const openEditAccountForm = (emp: ManagedEmployee) => {
     setFormError(null);
     setShowPassword(false);
+    const initialOverrides: Record<string, boolean> = {};
+    for (const p of activeAssignableProjects) {
+      if (p.addedEmployeeIds.includes(emp.id)) {
+        initialOverrides[p.id] = true;
+      } else if (
+        emp.teamId &&
+        p.assignedTeamIds.includes(emp.teamId) &&
+        p.excludedEmployeeIds.includes(emp.id)
+      ) {
+        initialOverrides[p.id] = false;
+      }
+    }
     setAccountForm({
       id: emp.id,
       username: emp.username ?? '',
@@ -284,6 +327,10 @@ export function EmployeesTeamsView({
       accountStatus: emp.accountStatus,
       password: '',
       confirmPassword: '',
+      selectedProjectIds: activeAssignableProjects
+        .filter((p) => storageService.isEmployeeAssignedToProject(emp, p))
+        .map((p) => p.id),
+      manuallyToggledProjectIds: initialOverrides,
     });
   };
 
@@ -367,6 +414,11 @@ export function EmployeesTeamsView({
           plannedEnd: accountForm.plannedEnd,
           restDays: accountForm.restDays,
           dailyTargetDossiers: parsedDailyTarget,
+          assignedProjectIds:
+            canAssignProjects &&
+            (accountForm.role === 'employee' || accountForm.role === 'supervisor')
+              ? accountForm.selectedProjectIds
+              : undefined,
         });
         if (res.error) {
           setFormError(res.error);
@@ -436,6 +488,11 @@ export function EmployeesTeamsView({
         {
           newPassword: accountForm.password.trim() ? accountForm.password : undefined,
           reason: 'Mise à jour compte utilisateur',
+          assignedProjectIds:
+            canAssignProjects &&
+            (accountForm.role === 'employee' || accountForm.role === 'supervisor')
+              ? accountForm.selectedProjectIds
+              : undefined,
         }
       );
       if (res.error) {
@@ -1423,11 +1480,16 @@ export function EmployeesTeamsView({
                   <select
                     value={accountForm.teamId}
                     onChange={(e) => {
-                      const t = teams.find((item) => item.id === e.target.value);
+                      const nextTeamId = e.target.value;
+                      const t = teams.find((item) => item.id === nextTeamId);
                       setAccountForm({
                         ...accountForm,
-                        teamId: e.target.value,
+                        teamId: nextTeamId,
                         supervisorId: t?.supervisorId ?? accountForm.supervisorId,
+                        selectedProjectIds: computeProjectsForTeamChange(
+                          nextTeamId,
+                          accountForm.manuallyToggledProjectIds
+                        ),
                       });
                     }}
                     className="w-full px-3 py-2 bg-white dark:bg-[#211E27] text-slate-900 dark:text-white border border-slate-300 dark:border-[#393342] rounded-lg focus:outline-none focus:border-[#A83CE2]"
@@ -1624,6 +1686,108 @@ export function EmployeesTeamsView({
               )}
             </div>
 
+            {/* Section Affectation aux projets */}
+            <div className="pt-3 border-t border-slate-200 dark:border-[#393342] space-y-2.5 text-xs">
+              <div className="flex items-center justify-between gap-2">
+                <div className="flex items-center gap-1.5 font-semibold text-slate-800 dark:text-white">
+                  <FolderKanban className="w-4 h-4 text-[#A83CE2] shrink-0" aria-hidden="true" />
+                  <span>Affectation aux projets</span>
+                </div>
+                {(accountForm.role === 'employee' || accountForm.role === 'supervisor') && (
+                  <span className="font-mono text-[11px] text-[#7624A8] dark:text-[#D896FF] tabular-nums">
+                    {accountForm.selectedProjectIds.length} sélectionné(s)
+                  </span>
+                )}
+              </div>
+
+              {accountForm.role === 'admin' || accountForm.role === 'manager' ? (
+                <div className="p-3 bg-slate-50 dark:bg-[#211E27] border border-slate-200 dark:border-[#393342] rounded-lg text-slate-600 dark:text-[#C8C2D0]">
+                  Les comptes {ROLE_LABELS[accountForm.role]} disposent automatiquement de l’accès de gestion aux projets selon leur rôle.
+                </div>
+              ) : activeAssignableProjects.length === 0 ? (
+                <div className="p-3 bg-slate-50 dark:bg-[#211E27] border border-slate-200 dark:border-[#393342] rounded-lg text-slate-500 dark:text-[#C8C2D0]">
+                  Aucun projet actif disponible pour affectation.
+                </div>
+              ) : (
+                <div className="space-y-2">
+                  {!canAssignProjects && (
+                    <div className="text-[11px] text-slate-500 dark:text-[#C8C2D0]">
+                      Consultation uniquement : seuls l’administrateur et les managers peuvent modifier les affectations aux projets.
+                    </div>
+                  )}
+                  <div className="border border-slate-200 dark:border-[#393342] rounded-lg divide-y divide-slate-100 dark:divide-[#393342] max-h-48 overflow-y-auto bg-white dark:bg-[#211E27]">
+                    {activeAssignableProjects.map((proj) => {
+                      const isChecked = accountForm.selectedProjectIds.includes(proj.id);
+                      const inSelectedTeam = Boolean(
+                        accountForm.teamId && proj.assignedTeamIds.includes(accountForm.teamId)
+                      );
+                      const statusHint = isChecked
+                        ? inSelectedTeam
+                          ? 'Inclus via équipe'
+                          : 'Affectation individuelle'
+                        : inSelectedTeam
+                        ? 'Exclu de l’équipe'
+                        : 'Non affecté';
+
+                      return (
+                        <label
+                          key={proj.id}
+                          className={`flex items-center justify-between gap-3 px-3.5 py-2.5 transition-colors ${
+                            canAssignProjects
+                              ? 'cursor-pointer hover:bg-[#F7EEFC]/50 dark:hover:bg-[#A83CE2]/10'
+                              : 'cursor-default opacity-80'
+                          }`}
+                        >
+                          <div className="flex items-center gap-2.5 min-w-0">
+                            <input
+                              type="checkbox"
+                              disabled={!canAssignProjects}
+                              checked={isChecked}
+                              onChange={() => {
+                                if (!canAssignProjects) return;
+                                const nextChecked = !isChecked;
+                                const nextSelected = nextChecked
+                                  ? Array.from(new Set([...accountForm.selectedProjectIds, proj.id]))
+                                  : accountForm.selectedProjectIds.filter((id) => id !== proj.id);
+                                setAccountForm({
+                                  ...accountForm,
+                                  selectedProjectIds: nextSelected,
+                                  manuallyToggledProjectIds: {
+                                    ...accountForm.manuallyToggledProjectIds,
+                                    [proj.id]: nextChecked,
+                                  },
+                                });
+                              }}
+                              className="w-4 h-4 accent-[#A83CE2] shrink-0"
+                            />
+                            <div className="min-w-0">
+                              <div className="font-medium text-slate-900 dark:text-white truncate">
+                                {proj.name}
+                              </div>
+                              <div className="text-[11px] font-mono text-slate-500 dark:text-[#C8C2D0]">
+                                {proj.code}
+                              </div>
+                            </div>
+                          </div>
+                          <span
+                            className={`text-[11px] shrink-0 ${
+                              isChecked
+                                ? 'font-semibold text-[#7624A8] dark:text-[#D896FF]'
+                                : inSelectedTeam
+                                ? 'font-medium text-amber-700 dark:text-amber-400'
+                                : 'text-slate-400 dark:text-[#C8C2D0]/60'
+                            }`}
+                          >
+                            {statusHint}
+                          </span>
+                        </label>
+                      );
+                    })}
+                  </div>
+                </div>
+              )}
+            </div>
+
             {formError && (
               <div className="text-xs text-red-700 dark:text-red-300 bg-red-50 dark:bg-red-950/40 border border-red-200 dark:border-red-800/60 rounded-lg px-3.5 py-2.5">
                 {formError}
@@ -1717,6 +1881,38 @@ export function EmployeesTeamsView({
               </div>
             </div>
 
+            {(inspectedEmp.role === 'employee' || inspectedEmp.role === 'supervisor') && (
+              <div>
+                <h4 className="text-xs font-semibold text-slate-700 dark:text-[#C8C2D0] mb-2">
+                  Projets actifs affectés
+                </h4>
+                {(() => {
+                  const empProjects = activeAssignableProjects.filter((p) =>
+                    storageService.isEmployeeAssignedToProject(inspectedEmp, p)
+                  );
+                  if (empProjects.length === 0) {
+                    return (
+                      <div className="text-xs text-slate-500 dark:text-[#C8C2D0]">
+                        Aucun projet actif affecté.
+                      </div>
+                    );
+                  }
+                  return (
+                    <div className="flex flex-wrap gap-2 text-xs">
+                      {empProjects.map((p) => (
+                        <span
+                          key={p.id}
+                          className="px-2.5 py-1 bg-[#F7EEFC] dark:bg-[#A83CE2]/20 text-[#7624A8] dark:text-[#D896FF] border border-[#A83CE2]/25 rounded font-medium"
+                        >
+                          {p.name}
+                        </span>
+                      ))}
+                    </div>
+                  );
+                })()}
+              </div>
+            )}
+
             <div>
               <h4 className="text-xs font-semibold text-slate-700 dark:text-[#C8C2D0] mb-2">
                 Derniers traitements & activités
@@ -1731,12 +1927,25 @@ export function EmployeesTeamsView({
                     <div key={a.id} className="px-3.5 py-2.5 flex items-center justify-between gap-2">
                       <div>
                         <span className="font-semibold text-slate-900 dark:text-white">
-                          {a.taskTitle}
-                        </span>{' '}
-                        <span className="text-slate-500 dark:text-[#C8C2D0]">· {a.clientName}</span>{' '}
-                        <span className="font-mono text-slate-400 dark:text-[#C8C2D0]/70">
-                          ({a.dossierRef})
+                          {a.taskTitle || a.projectName || 'Traitement'}
                         </span>
+                        {a.clientName && (
+                          <span className="text-slate-500 dark:text-[#C8C2D0]">
+                            {' '}
+                            · {a.clientName}
+                          </span>
+                        )}
+                        {a.dossierRef ? (
+                          <span className="font-mono text-slate-400 dark:text-[#C8C2D0]/70">
+                            {' '}
+                            ({a.dossierRef})
+                          </span>
+                        ) : a.formVersionNumber ? (
+                          <span className="font-mono text-slate-400 dark:text-[#C8C2D0]/70">
+                            {' '}
+                            (v{a.formVersionNumber})
+                          </span>
+                        ) : null}
                       </div>
                       <div className="font-mono text-slate-700 dark:text-[#C8C2D0] whitespace-nowrap">
                         {formatTimeShort(a.startedAt)}–{formatTimeShort(a.endedAt)} (
@@ -1778,9 +1987,12 @@ export function EmployeesTeamsView({
                     <div key={q.id} className="px-3.5 py-2 flex items-center justify-between">
                       <div className="text-slate-700 dark:text-[#C8C2D0]">
                         <span className="font-mono font-semibold text-slate-900 dark:text-white">
-                          {q.dossierRef}
-                        </span>{' '}
-                        · {q.companyName} ({q.taskName})
+                          {q.dossierRef ||
+                            (q.projectName ? `${q.projectName} (v${q.formVersionNumber ?? 1})` : '—')}
+                        </span>
+                        {q.companyName || q.taskName
+                          ? ` · ${[q.companyName, q.taskName].filter(Boolean).join(' · ')}`
+                          : ''}
                       </div>
                       <QualityControlStatusText status={q.status} />
                     </div>

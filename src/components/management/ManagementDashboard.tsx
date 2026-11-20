@@ -364,10 +364,21 @@ export function ManagementDashboard({
                 <div key={qc.id} className="px-5 py-3.5 flex items-center justify-between gap-3">
                   <div className="min-w-0">
                     <div className="text-sm font-medium text-slate-900 dark:text-white truncate">
-                      {qc.employeeName} · <span className="font-mono text-xs">{qc.dossierRef}</span>
+                      {qc.employeeName}
+                      {qc.dossierRef ? (
+                        <>
+                          {' '}
+                          · <span className="font-mono text-xs">{qc.dossierRef}</span>
+                        </>
+                      ) : qc.projectName ? (
+                        <> · {qc.projectName}</>
+                      ) : null}
                     </div>
                     <div className="text-xs text-slate-500 dark:text-[#C8C2D0] truncate mt-0.5">
-                      {qc.companyName} · {qc.taskName}
+                      {[qc.companyName, qc.taskName].filter(Boolean).join(' · ') ||
+                        (qc.projectName
+                          ? `${qc.projectName} · v${qc.formVersionNumber ?? 1}`
+                          : '—')}
                     </div>
                   </div>
                   <QualityControlStatusText status={qc.status} />

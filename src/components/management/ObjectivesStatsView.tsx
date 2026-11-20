@@ -1,16 +1,20 @@
 import React, { useMemo, useState } from 'react';
 import { Plus, Save, Trash2 } from 'lucide-react';
 import {
+  ActivityRecord,
   CompanyRecord,
   AppUser,
   ManagedEmployee,
   ObjectivePeriod,
   ProductionObjective,
+  ProjectFieldType,
+  ProjectRecord,
   QualityControlRecord,
   ReferenceTimeEntry,
   TaskRecord,
   TeamRecord,
 } from '../../core/types';
+import { PROJECT_FIELD_TYPE_LABELS } from '../../core/permissions';
 import {
   formatDurationHM,
   isSameDayYmd,
@@ -29,6 +33,10 @@ interface ObjectivesStatsViewProps {
   teams: TeamRecord[];
   companies: CompanyRecord[];
   tasks: TaskRecord[];
+  projects: ProjectRecord[];
+  treatmentActivities: Array<
+    ActivityRecord & { employeeName: string; teamId: string; matricule: string }
+  >;
   referenceTimes: ReferenceTimeEntry[];
   objectives: ProductionObjective[];
   qualityControls: QualityControlRecord[];
@@ -39,12 +47,21 @@ interface ObjectivesStatsViewProps {
 
 type PeriodMode = 'jour' | 'semaine' | 'mois' | 'trimestre' | 'annee' | 'personnalisee';
 
+interface ProjectFieldAnalysisDescriptor {
+  key: string;
+  label: string;
+  type: ProjectFieldType;
+  fieldIds: Set<string>;
+}
+
 export function ObjectivesStatsView({
   user,
   employees,
   teams,
   companies,
   tasks,
+  projects,
+  treatmentActivities,
   referenceTimes,
   objectives,
   qualityControls,
@@ -63,8 +80,10 @@ export function ObjectivesStatsView({
     isSupervisor && user.teamId ? user.teamId : 'all'
   );
   const [employeeFilter, setEmployeeFilter] = useState<string>('all');
+  const [projectFilter, setProjectFilter] = useState<string>('all');
   const [companyFilter, setCompanyFilter] = useState<string>('all');
   const [taskFilter, setTaskFilter] = useState<string>('all');
+  const [selectedCustomFieldKey, setSelectedCustomFieldKey] = useState<string>('');
 
   const activeEmployeeAccounts = useMemo(
     () => employees.filter((e) => e.role === 'employee' && e.accountStatus === 'actif'),
@@ -89,6 +108,32 @@ export function ObjectivesStatsView({
   const now = useMemo(() => new Date(), []);
   const todayYmd = toYmd(now);
 
+  const projectOptions = useMemo(() => {
+    const map = new Map<string, { id: string; name: string; active: boolean }>();
+    for (const p of projects) {
+      map.set(p.id, { id: p.id, name: p.name, active: p.active });
+    }
+    for (const q of qualityControls) {
+      if (q.projectId && !map.has(q.projectId)) {
+        map.set(q.projectId, {
+          id: q.projectId,
+          name: q.projectName ?? q.projectId,
+          active: false,
+        });
+      }
+    }
+    for (const a of treatmentActivities) {
+      if (a.projectId && !map.has(a.projectId)) {
+        map.set(a.projectId, {
+          id: a.projectId,
+          name: a.projectName ?? a.projectId,
+          active: false,
+        });
+      }
+    }
+    return Array.from(map.values());
+  }, [projects, qualityControls, treatmentActivities]);
+
   const scopedEmployees = useMemo(() => {
     return allEmployeeAccounts.filter((e) => {
       if (isSupervisor && user.teamId && e.teamId !== user.teamId) return false;
@@ -110,21 +155,26 @@ export function ObjectivesStatsView({
     qualityControls,
   ]);
 
+  const matchesPeriod = (iso: string) => {
+    if (periodMode === 'jour') return isSameDayYmd(iso, todayYmd);
+    if (periodMode === 'semaine') return isWithinDays(iso, now, 7);
+    if (periodMode === 'mois') return isSameMonth(iso, now.getFullYear(), now.getMonth());
+    if (periodMode === 'trimestre') return isSameQuarter(iso, now.getFullYear(), now.getMonth());
+    if (periodMode === 'annee') return isSameYear(iso, now.getFullYear());
+    return isWithinDateRange(iso, customStart, customEnd);
+  };
+
   const filteredQc = useMemo(() => {
     return qualityControls.filter((q) => {
       if (isSupervisor && user.teamId && q.teamId !== user.teamId) return false;
       if (teamFilter !== 'all' && q.teamId !== teamFilter) return false;
       if (employeeFilter !== 'all' && q.employeeId !== employeeFilter) return false;
+      if (projectFilter === 'none' && q.projectId) return false;
+      if (projectFilter !== 'all' && projectFilter !== 'none' && q.projectId !== projectFilter)
+        return false;
       if (companyFilter !== 'all' && q.companyId !== companyFilter) return false;
       if (taskFilter !== 'all' && q.taskId !== taskFilter) return false;
-
-      if (periodMode === 'jour') return isSameDayYmd(q.treatedAt, todayYmd);
-      if (periodMode === 'semaine') return isWithinDays(q.treatedAt, now, 7);
-      if (periodMode === 'mois') return isSameMonth(q.treatedAt, now.getFullYear(), now.getMonth());
-      if (periodMode === 'trimestre')
-        return isSameQuarter(q.treatedAt, now.getFullYear(), now.getMonth());
-      if (periodMode === 'annee') return isSameYear(q.treatedAt, now.getFullYear());
-      return isWithinDateRange(q.treatedAt, customStart, customEnd);
+      return matchesPeriod(q.treatedAt);
     });
   }, [
     qualityControls,
@@ -132,6 +182,35 @@ export function ObjectivesStatsView({
     user.teamId,
     teamFilter,
     employeeFilter,
+    projectFilter,
+    companyFilter,
+    taskFilter,
+    periodMode,
+    todayYmd,
+    now,
+    customStart,
+    customEnd,
+  ]);
+
+  const filteredTreatments = useMemo(() => {
+    return treatmentActivities.filter((a) => {
+      if (isSupervisor && user.teamId && a.teamId !== user.teamId) return false;
+      if (teamFilter !== 'all' && a.teamId !== teamFilter) return false;
+      if (employeeFilter !== 'all' && a.userId !== employeeFilter) return false;
+      if (projectFilter === 'none' && a.projectId) return false;
+      if (projectFilter !== 'all' && projectFilter !== 'none' && a.projectId !== projectFilter)
+        return false;
+      if (companyFilter !== 'all' && (a.companyId ?? '') !== companyFilter) return false;
+      if (taskFilter !== 'all' && (a.taskId ?? '') !== taskFilter) return false;
+      return matchesPeriod(a.endedAt);
+    });
+  }, [
+    treatmentActivities,
+    isSupervisor,
+    user.teamId,
+    teamFilter,
+    employeeFilter,
+    projectFilter,
     companyFilter,
     taskFilter,
     periodMode,
@@ -143,18 +222,39 @@ export function ObjectivesStatsView({
 
   // Indicateurs calculés (les dossiers en_attente ne sont jamais comptés comme conformes)
   const analytics = useMemo(() => {
-    const totalDossiers = scopedEmployees.reduce((s, e) => s + e.dossiersToday, 0) + filteredQc.length;
+    const isProjectScoped = projectFilter !== 'all';
+    const totalDossiers = isProjectScoped
+      ? filteredTreatments.length > 0
+        ? filteredTreatments.length
+        : filteredQc.length
+      : scopedEmployees.reduce((s, e) => s + e.dossiersToday, 0) + filteredQc.length;
+
     const totalPresenceSec = scopedEmployees.reduce((s, e) => s + e.presenceSecondsToday, 0);
-    const totalProductiveSec = scopedEmployees.reduce((s, e) => s + e.productiveSecondsToday, 0);
+    const totalProductiveSec = isProjectScoped
+      ? filteredTreatments.reduce((s, t) => s + t.durationSeconds, 0) ||
+        filteredQc.reduce((s, q) => s + q.durationSeconds, 0)
+      : scopedEmployees.reduce((s, e) => s + e.productiveSecondsToday, 0);
+
     const avgDurationSec =
       filteredQc.length > 0
         ? Math.round(filteredQc.reduce((s, q) => s + q.durationSeconds, 0) / filteredQc.length)
+        : filteredTreatments.length > 0
+        ? Math.round(
+            filteredTreatments.reduce((s, t) => s + t.durationSeconds, 0) /
+              filteredTreatments.length
+          )
         : 0;
 
-    const hourlyProd =
-      totalProductiveSec > 0
-        ? (scopedEmployees.reduce((s, e) => s + e.dossiersToday, 0) / (totalProductiveSec / 3600)).toFixed(1)
-        : '0.0';
+    const hourlyProd = isProjectScoped
+      ? totalProductiveSec > 0
+        ? (totalDossiers / (totalProductiveSec / 3600)).toFixed(1)
+        : '0.0'
+      : totalProductiveSec > 0
+      ? (
+          scopedEmployees.reduce((s, e) => s + e.dossiersToday, 0) /
+          (totalProductiveSec / 3600)
+        ).toFixed(1)
+      : '0.0';
 
     const controlled = filteredQc.filter((q) => q.status !== 'en_attente');
     const compliant = controlled.filter(
@@ -194,7 +294,7 @@ export function ObjectivesStatsView({
       objectiveAttainment,
       scheduleCompliance: 94,
     };
-  }, [scopedEmployees, filteredQc]);
+  }, [scopedEmployees, filteredQc, filteredTreatments, projectFilter]);
 
   // Productivité pondérée par les temps de référence par employé
   const weightedEmployeeRows = useMemo(() => {
@@ -239,6 +339,7 @@ export function ObjectivesStatsView({
   const companyBreakdown = useMemo(() => {
     const map: Record<string, { name: string; count: number; totalSec: number }> = {};
     for (const q of filteredQc) {
+      if (!q.companyId || !q.companyName) continue;
       if (!map[q.companyId]) {
         map[q.companyId] = { name: q.companyName, count: 0, totalSec: 0 };
       }
@@ -247,6 +348,143 @@ export function ObjectivesStatsView({
     }
     return Object.values(map);
   }, [filteredQc]);
+
+  // Répartition par projet
+  const projectBreakdown = useMemo(() => {
+    const map: Record<string, { name: string; count: number; totalSec: number }> = {};
+    const source = filteredTreatments.length > 0 ? filteredTreatments : filteredQc;
+    for (const item of source) {
+      const key = item.projectId ?? '__none__';
+      const label = item.projectName || 'Sans projet';
+      if (!map[key]) {
+        map[key] = { name: label, count: 0, totalSec: 0 };
+      }
+      map[key].count += 1;
+      map[key].totalSec += item.durationSeconds;
+    }
+    return Object.values(map).sort((a, b) => b.count - a.count);
+  }, [filteredTreatments, filteredQc]);
+
+  // Analyse par champ personnalisé STRICTEMENT isolée au projet sélectionné
+  const selectedProjectRecord = useMemo(() => {
+    if (projectFilter === 'all' || projectFilter === 'none') return null;
+    return projects.find((p) => p.id === projectFilter) ?? null;
+  }, [projects, projectFilter]);
+
+  const projectCustomFieldDescriptors = useMemo<ProjectFieldAnalysisDescriptor[]>(() => {
+    if (projectFilter === 'all' || projectFilter === 'none') return [];
+    const byKey = new Map<string, ProjectFieldAnalysisDescriptor>();
+
+    const registerField = (f: { id: string; label: string; type: ProjectFieldType }) => {
+      const key = `${f.type}::${f.label.trim().toLowerCase()}`;
+      const existing = byKey.get(key);
+      if (existing) {
+        existing.fieldIds.add(f.id);
+      } else {
+        byKey.set(key, {
+          key,
+          label: f.label.trim(),
+          type: f.type,
+          fieldIds: new Set([f.id]),
+        });
+      }
+    };
+
+    if (selectedProjectRecord) {
+      for (const ver of selectedProjectRecord.formVersions) {
+        for (const f of ver.fields) registerField(f);
+      }
+    }
+    for (const tr of filteredTreatments) {
+      if (tr.projectId !== projectFilter) continue;
+      for (const f of tr.formFieldsSnapshot ?? []) registerField(f);
+    }
+    for (const q of filteredQc) {
+      if (q.projectId !== projectFilter) continue;
+      for (const f of q.formFieldsSnapshot ?? []) registerField(f);
+    }
+
+    return Array.from(byKey.values());
+  }, [projectFilter, selectedProjectRecord, filteredTreatments, filteredQc]);
+
+  const effectiveCustomField = useMemo(() => {
+    if (projectCustomFieldDescriptors.length === 0) return null;
+    return (
+      projectCustomFieldDescriptors.find((d) => d.key === selectedCustomFieldKey) ??
+      projectCustomFieldDescriptors[0]
+    );
+  }, [projectCustomFieldDescriptors, selectedCustomFieldKey]);
+
+  const customFieldStats = useMemo(() => {
+    if (!effectiveCustomField || projectFilter === 'all' || projectFilter === 'none') return null;
+    const records = (
+      filteredTreatments.length > 0
+        ? filteredTreatments.map((t) => ({
+            durationSeconds: t.durationSeconds,
+            customResponses: t.customResponses,
+          }))
+        : filteredQc.map((q) => ({
+            durationSeconds: q.durationSeconds,
+            customResponses: q.customResponses,
+          }))
+    );
+
+    const values: Array<{ raw: string | string[]; durationSeconds: number }> = [];
+    for (const rec of records) {
+      const resp = rec.customResponses;
+      if (!resp) continue;
+      for (const fid of effectiveCustomField.fieldIds) {
+        if (resp[fid] !== undefined) {
+          values.push({ raw: resp[fid], durationSeconds: rec.durationSeconds });
+          break;
+        }
+      }
+    }
+
+    if (effectiveCustomField.type === 'number') {
+      const nums: number[] = [];
+      for (const v of values) {
+        const s = typeof v.raw === 'string' ? v.raw.trim() : '';
+        if (!s) continue;
+        const n = Number(s);
+        if (!Number.isNaN(n)) nums.push(n);
+      }
+      const sum = nums.reduce((acc, n) => acc + n, 0);
+      return {
+        kind: 'number' as const,
+        totalRecords: records.length,
+        answeredCount: nums.length,
+        sum,
+        avg: nums.length > 0 ? sum / nums.length : 0,
+        min: nums.length > 0 ? Math.min(...nums) : 0,
+        max: nums.length > 0 ? Math.max(...nums) : 0,
+      };
+    }
+
+    const counts: Record<string, { label: string; count: number; totalSec: number }> = {};
+    let answeredCount = 0;
+    for (const v of values) {
+      const items = Array.isArray(v.raw)
+        ? v.raw.map((x) => String(x).trim()).filter(Boolean)
+        : String(v.raw ?? '').trim()
+        ? [String(v.raw).trim()]
+        : [];
+      if (items.length > 0) answeredCount += 1;
+      for (const item of items) {
+        if (!counts[item]) counts[item] = { label: item, count: 0, totalSec: 0 };
+        counts[item].count += 1;
+        counts[item].totalSec += v.durationSeconds;
+      }
+    }
+
+    const breakdown = Object.values(counts).sort((a, b) => b.count - a.count);
+    return {
+      kind: 'categorical' as const,
+      totalRecords: records.length,
+      answeredCount,
+      breakdown,
+    };
+  }, [effectiveCustomField, projectFilter, filteredTreatments, filteredQc]);
 
   const handleCreateObjective = (e: React.FormEvent) => {
     e.preventDefault();
@@ -296,7 +534,7 @@ export function ObjectivesStatsView({
           ))}
         </div>
 
-        <div className="grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-4 gap-3">
+        <div className="grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-5 gap-3">
           {!isSupervisor && (
             <select
               value={teamFilter}
@@ -325,6 +563,22 @@ export function ObjectivesStatsView({
                   {e.accountStatus !== 'actif' ? ' (Désactivé)' : ''}
                 </option>
               ))}
+          </select>
+          <select
+            value={projectFilter}
+            onChange={(e) => {
+              setProjectFilter(e.target.value);
+              setSelectedCustomFieldKey('');
+            }}
+            className="px-3 py-2 text-xs border border-slate-300 dark:border-[#393342] rounded-lg bg-white dark:bg-[#211E27] text-slate-900 dark:text-white focus:outline-none focus:border-[#A83CE2]"
+          >
+            <option value="all">Tous les projets</option>
+            <option value="none">Sans projet (historique)</option>
+            {projectOptions.map((p) => (
+              <option key={p.id} value={p.id}>
+                {p.name} {!p.active ? '(désactivé)' : ''}
+              </option>
+            ))}
           </select>
           <select
             value={companyFilter}
@@ -402,6 +656,147 @@ export function ObjectivesStatsView({
           value={analytics.objectiveAttainment !== null ? `${analytics.objectiveAttainment}%` : 'Non défini'}
           subtext="Calculé sur les comptes ayant un objectif défini"
         />
+      </div>
+
+      {/* Répartition par projet & Analyse par champ personnalisé */}
+      <div className="grid grid-cols-1 lg:grid-cols-12 gap-6">
+        <section className="lg:col-span-5 bg-white dark:bg-[#292631] border border-slate-200 dark:border-[#393342] rounded-lg p-5 space-y-4">
+          <h2 className="text-base font-semibold text-slate-900 dark:text-white">
+            Répartition par projet
+          </h2>
+          {projectBreakdown.length === 0 ? (
+            <div className="text-xs text-slate-500 dark:text-[#C8C2D0] py-4">
+              Aucune donnée sur cette sélection.
+            </div>
+          ) : (
+            <div className="space-y-3">
+              {projectBreakdown.map((item) => {
+                const maxCount = Math.max(...projectBreakdown.map((c) => c.count), 1);
+                const widthPct = Math.round((item.count / maxCount) * 100);
+                return (
+                  <div key={item.name} className="space-y-1 text-xs">
+                    <div className="flex justify-between font-medium text-slate-800 dark:text-white">
+                      <span>{item.name}</span>
+                      <span className="font-mono text-slate-700 dark:text-[#C8C2D0]">
+                        {item.count} doss. ({formatDurationHM(item.totalSec)})
+                      </span>
+                    </div>
+                    <div className="w-full h-2.5 bg-[#F7EEFC] dark:bg-[#211E27] rounded overflow-hidden">
+                      <div className="h-full bg-[#A83CE2]" style={{ width: `${widthPct}%` }} />
+                    </div>
+                  </div>
+                );
+              })}
+            </div>
+          )}
+        </section>
+
+        <section className="lg:col-span-7 bg-white dark:bg-[#292631] border border-slate-200 dark:border-[#393342] rounded-lg p-5 space-y-4">
+          <div className="flex flex-col sm:flex-row sm:items-center sm:justify-between gap-2">
+            <div>
+              <h2 className="text-base font-semibold text-slate-900 dark:text-white">
+                Analyse par champ personnalisé
+              </h2>
+              <p className="text-xs text-slate-500 dark:text-[#C8C2D0]">
+                Strictement isolée au projet sélectionné pour ne jamais mélanger les données.
+              </p>
+            </div>
+            {projectCustomFieldDescriptors.length > 0 && effectiveCustomField && (
+              <select
+                aria-label="Champ personnalisé à analyser"
+                value={effectiveCustomField.key}
+                onChange={(e) => setSelectedCustomFieldKey(e.target.value)}
+                className="px-3 py-1.5 text-xs border border-slate-300 dark:border-[#393342] rounded-lg bg-white dark:bg-[#211E27] text-slate-900 dark:text-white focus:outline-none focus:border-[#A83CE2]"
+              >
+                {projectCustomFieldDescriptors.map((f) => (
+                  <option key={f.key} value={f.key}>
+                    {f.label} ({PROJECT_FIELD_TYPE_LABELS[f.type]})
+                  </option>
+                ))}
+              </select>
+            )}
+          </div>
+
+          {projectFilter === 'all' || projectFilter === 'none' ? (
+            <div className="text-xs text-slate-500 dark:text-[#C8C2D0] py-4">
+              Sélectionnez un projet spécifique dans les filtres ci-dessus pour analyser ses champs personnalisés.
+            </div>
+          ) : projectCustomFieldDescriptors.length === 0 ? (
+            <div className="text-xs text-slate-500 dark:text-[#C8C2D0] py-4">
+              Ce projet ne contient aucun champ personnalisé exploitable sur la sélection.
+            </div>
+          ) : customFieldStats?.kind === 'number' ? (
+            <div className="grid grid-cols-2 sm:grid-cols-4 gap-3 text-xs">
+              <div className="p-3 bg-slate-50 dark:bg-[#211E27] border border-slate-200 dark:border-[#393342] rounded-lg">
+                <div className="text-slate-500 dark:text-[#C8C2D0]">Réponses</div>
+                <div className="mt-1 text-lg font-bold font-mono text-slate-900 dark:text-white">
+                  {customFieldStats.answeredCount} / {customFieldStats.totalRecords}
+                </div>
+              </div>
+              <div className="p-3 bg-slate-50 dark:bg-[#211E27] border border-slate-200 dark:border-[#393342] rounded-lg">
+                <div className="text-slate-500 dark:text-[#C8C2D0]">Cumul</div>
+                <div className="mt-1 text-lg font-bold font-mono text-[#7624A8] dark:text-[#D896FF]">
+                  {customFieldStats.sum.toLocaleString('fr-FR')}
+                </div>
+              </div>
+              <div className="p-3 bg-slate-50 dark:bg-[#211E27] border border-slate-200 dark:border-[#393342] rounded-lg">
+                <div className="text-slate-500 dark:text-[#C8C2D0]">Moyenne</div>
+                <div className="mt-1 text-lg font-bold font-mono text-slate-900 dark:text-white">
+                  {customFieldStats.avg.toLocaleString('fr-FR', { maximumFractionDigits: 2 })}
+                </div>
+              </div>
+              <div className="p-3 bg-slate-50 dark:bg-[#211E27] border border-slate-200 dark:border-[#393342] rounded-lg">
+                <div className="text-slate-500 dark:text-[#C8C2D0]">Min / Max</div>
+                <div className="mt-1 text-sm font-bold font-mono text-slate-900 dark:text-white">
+                  {customFieldStats.min} / {customFieldStats.max}
+                </div>
+              </div>
+            </div>
+          ) : customFieldStats?.kind === 'categorical' ? (
+            <div className="space-y-3">
+              <div className="text-xs text-slate-500 dark:text-[#C8C2D0]">
+                {customFieldStats.answeredCount} dossier(s) renseigné(s) sur{' '}
+                {customFieldStats.totalRecords}
+              </div>
+              {customFieldStats.breakdown.length === 0 ? (
+                <div className="text-xs text-slate-500 dark:text-[#C8C2D0] py-2">
+                  Aucune valeur enregistrée pour ce champ sur la période.
+                </div>
+              ) : (
+                <div className="space-y-2.5 max-h-56 overflow-y-auto pr-1">
+                  {customFieldStats.breakdown.slice(0, 12).map((row) => {
+                    const max = Math.max(
+                      ...customFieldStats.breakdown.map((b) => b.count),
+                      1
+                    );
+                    const widthPct = Math.round((row.count / max) * 100);
+                    const pct =
+                      customFieldStats.answeredCount > 0
+                        ? Math.round((row.count / customFieldStats.answeredCount) * 100)
+                        : 0;
+                    const avgSec = row.count > 0 ? Math.round(row.totalSec / row.count) : 0;
+                    return (
+                      <div key={row.label} className="space-y-1 text-xs">
+                        <div className="flex justify-between font-medium text-slate-800 dark:text-white gap-2">
+                          <span className="truncate">{row.label}</span>
+                          <span className="font-mono text-slate-600 dark:text-[#C8C2D0] shrink-0">
+                            {row.count} ({pct}%) · moy. {formatDurationHM(avgSec)}
+                          </span>
+                        </div>
+                        <div className="w-full h-2 bg-[#F7EEFC] dark:bg-[#211E27] rounded overflow-hidden">
+                          <div
+                            className="h-full bg-[#A83CE2]"
+                            style={{ width: `${widthPct}%` }}
+                          />
+                        </div>
+                      </div>
+                    );
+                  })}
+                </div>
+              )}
+            </div>
+          ) : null}
+        </section>
       </div>
 
       {/* Productivité pondérée par temps de référence & Répartition par société */}

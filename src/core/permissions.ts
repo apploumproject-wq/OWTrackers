@@ -1,4 +1,12 @@
-import { NavModuleId, OutingReason, PauseSlot, Permission, UserRole } from './types';
+import {
+  LeaveStatus,
+  NavModuleId,
+  OutingReason,
+  PauseSlot,
+  Permission,
+  ProjectFieldType,
+  UserRole,
+} from './types';
 
 /**
  * Matrice de permissions et d'accès par rôle.
@@ -31,7 +39,9 @@ export const PERMISSION_LABELS: Record<Permission, string> = {
   'export:reports': 'Exporter les rapports (Excel, CSV, PDF)',
   'manage:settings_permissions': 'Paramètres, permissions et traçabilité',
   'approve:outings': 'Valider sorties et demandes de correction',
-  'manage:leaves': 'Enregistrer, modifier et annuler les congés',
+  'manage:leaves': 'Enregistrer, modifier et statuer les congés',
+  'view:projects': 'Consulter les projets et affectations',
+  'manage:projects': 'Créer et configurer les projets et formulaires',
 };
 
 export const BASE_ROLE_PERMISSIONS: Record<UserRole, Permission[]> = {
@@ -49,6 +59,7 @@ export const BASE_ROLE_PERMISSIONS: Record<UserRole, Permission[]> = {
     'manage:employees',
     'manage:schedules',
     'manage:leaves',
+    'view:projects',
     'manage:quality',
     'view:objectives_stats',
     'approve:outings',
@@ -58,6 +69,8 @@ export const BASE_ROLE_PERMISSIONS: Record<UserRole, Permission[]> = {
     'view:management_dashboard',
     'manage:employees',
     'manage:teams',
+    'view:projects',
+    'manage:projects',
     'manage:clients',
     'manage:tasks',
     'manage:schedules',
@@ -72,6 +85,8 @@ export const BASE_ROLE_PERMISSIONS: Record<UserRole, Permission[]> = {
     'view:management_dashboard',
     'manage:employees',
     'manage:teams',
+    'view:projects',
+    'manage:projects',
     'manage:clients',
     'manage:tasks',
     'manage:schedules',
@@ -111,6 +126,24 @@ export const OUTING_REASON_CONFIG: Record<
   autre: { label: 'Autre', requiresAuthorization: false },
 };
 
+export const LEAVE_STATUS_LABELS: Record<LeaveStatus, string> = {
+  en_attente: 'En attente',
+  valide: 'Validé',
+  refuse: 'Refusé',
+};
+
+export const PROJECT_FIELD_TYPE_LABELS: Record<ProjectFieldType, string> = {
+  short_text: 'Texte court',
+  long_text: 'Texte long',
+  number: 'Nombre',
+  date: 'Date',
+  time: 'Heure',
+  email: 'Adresse e-mail',
+  select: 'Liste déroulante',
+  checkbox: 'Cases à cocher',
+  radio: 'Choix unique',
+};
+
 export interface NavItemConfig {
   id: NavModuleId;
   label: string;
@@ -131,6 +164,7 @@ export const ALL_NAV_ITEMS: NavItemConfig[] = [
   { id: 'mgmt_dashboard', label: 'Tableau de bord', section: 'principal', requiredPermission: 'view:management_dashboard' },
   { id: 'mgmt_employees', label: 'Utilisateurs', section: 'pilotage', requiredPermission: 'manage:employees' },
   { id: 'mgmt_teams', label: 'Équipes', section: 'pilotage', requiredPermission: 'manage:teams' },
+  { id: 'mgmt_projects', label: 'Gestion des projets', section: 'pilotage', requiredPermission: 'view:projects' },
   { id: 'mgmt_clients', label: 'Sociétés & tâches', section: 'pilotage', requiredPermission: 'manage:clients' },
   { id: 'mgmt_schedules', label: 'Horaires & sorties', section: 'pilotage', requiredPermission: 'manage:schedules' },
   { id: 'mgmt_leaves', label: 'Gestion des congés', section: 'pilotage', requiredPermission: 'manage:leaves' },
@@ -154,6 +188,7 @@ export function getPermissionsForRole(
         'view:own_profile',
         'view:management_dashboard',
         'manage:leaves',
+        'view:projects',
         ...supervisorPermissions,
       ])
     );

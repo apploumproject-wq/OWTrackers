@@ -35,7 +35,9 @@ export type Permission =
   | 'export:reports'
   | 'manage:settings_permissions'
   | 'approve:outings'
-  | 'manage:leaves';
+  | 'manage:leaves'
+  | 'view:projects'
+  | 'manage:projects';
 
 export type NavModuleId =
   | 'employee_home'
@@ -47,6 +49,7 @@ export type NavModuleId =
   | 'mgmt_dashboard'
   | 'mgmt_employees'
   | 'mgmt_teams'
+  | 'mgmt_projects'
   | 'mgmt_clients'
   | 'mgmt_tasks'
   | 'mgmt_schedules'
@@ -179,6 +182,12 @@ export interface QualityControlRecord {
   companyName: string;
   taskId: string;
   taskName: string;
+  projectId?: string;
+  projectName?: string;
+  formVersionId?: string;
+  formVersionNumber?: number;
+  formFieldsSnapshot?: ProjectFormField[];
+  customResponses?: Record<string, CustomFieldValue>;
   treatedAt: string;
   durationSeconds: number;
   receptionChannel?: ReceptionChannel;
@@ -240,6 +249,12 @@ export interface ActiveTimerSession {
   id: string;
   type: ActivityType;
   startedAt: string;
+  projectId?: string;
+  projectName?: string;
+  formVersionId?: string;
+  formVersionNumber?: number;
+  formFieldsSnapshot?: ProjectFormField[];
+  customResponses?: Record<string, CustomFieldValue>;
   taskId?: string;
   taskTitle: string;
   companyId?: string;
@@ -262,6 +277,12 @@ export interface ActivityRecord {
   id: string;
   userId: string;
   type: ActivityType;
+  projectId?: string;
+  projectName?: string;
+  formVersionId?: string;
+  formVersionNumber?: number;
+  formFieldsSnapshot?: ProjectFormField[];
+  customResponses?: Record<string, CustomFieldValue>;
   taskId?: string;
   taskTitle: string;
   companyId?: string;
@@ -352,8 +373,8 @@ export interface DailyHistoryEntry {
   qualityScore: number;
 }
 
-export type LeaveStatus = 'valide' | 'annule';
-export type LeaveActionType = 'validation' | 'modification' | 'annulation';
+export type LeaveStatus = 'en_attente' | 'valide' | 'refuse';
+export type LeaveActionType = 'creation' | 'modification' | 'statut';
 
 export interface LeaveActionTrace {
   id: string;
@@ -362,6 +383,8 @@ export interface LeaveActionTrace {
   actorName: string;
   actorRole: UserRole;
   timestamp: string;
+  oldStatus?: LeaveStatus;
+  newStatus?: LeaveStatus;
   details: string;
 }
 
@@ -374,31 +397,18 @@ export interface LeaveRecord {
   endDate: string; // YYYY-MM-DD
   startTime: string; // HH:mm
   endTime: string; // HH:mm
+  motif?: string;
   status: LeaveStatus;
   createdById: string;
   createdByName: string;
   createdByRole: UserRole;
-  validatedAt: string;
+  createdAt: string;
+  validatedAt?: string;
   updatedById?: string;
   updatedByName?: string;
   updatedByRole?: UserRole;
   updatedAt?: string;
-  cancelledById?: string;
-  cancelledByName?: string;
-  cancelledByRole?: UserRole;
-  cancelledAt?: string;
-  cancellationReason?: string;
   history: LeaveActionTrace[];
-}
-
-export interface PlanningLeaveOverlay {
-  key: string; // `${leaveId}__${dateYmd}`
-  leaveId: string;
-  dateYmd: string;
-  motif: string;
-  remplacant: string;
-  updatedAt?: string;
-  updatedByName?: string;
 }
 
 export interface PlanningManualRow {
@@ -418,10 +428,9 @@ export interface PlanningManualRow {
 
 export interface PlanningDisplayRow {
   rowKey: string;
-  source: 'leave' | 'manual';
+  source: 'manual';
   dateYmd: string;
-  leaveId?: string;
-  slotIndex?: number;
+  slotIndex: number;
   matricule: string;
   employeeName: string;
   startTime: string;
@@ -444,11 +453,82 @@ export interface PlanningWeekData {
   days: PlanningWeekDay[];
 }
 
-export interface MyValidatedLeaveItem {
+export interface MyLeaveItem {
   id: string;
   startDate: string;
   endDate: string;
   startTime: string;
   endTime: string;
-  motifs: string[];
+  motif?: string;
+  status: LeaveStatus;
+  createdAt: string;
+}
+
+export type MyValidatedLeaveItem = MyLeaveItem;
+
+// --- Gestion des projets & Formulaires personnalisables ---
+
+export type ProjectFieldType =
+  | 'short_text'
+  | 'long_text'
+  | 'number'
+  | 'date'
+  | 'time'
+  | 'email'
+  | 'select'
+  | 'checkbox'
+  | 'radio';
+
+export type CustomFieldValue = string | string[];
+
+export interface ProjectFormField {
+  id: string;
+  label: string;
+  type: ProjectFieldType;
+  required: boolean;
+  options?: string[];
+  order: number;
+  active: boolean;
+}
+
+export interface FormTemplate {
+  id: string;
+  name: string;
+  description: string;
+  isPredefined: boolean;
+  fields: ProjectFormField[];
+  createdAt: string;
+  updatedAt: string;
+  createdByName: string;
+}
+
+export interface ProjectFormVersion {
+  id: string;
+  projectId: string;
+  versionNumber: number;
+  fields: ProjectFormField[];
+  sourceTemplateId?: string;
+  sourceTemplateName?: string;
+  publishedAt: string;
+  publishedById: string;
+  publishedByName: string;
+  changeNote?: string;
+}
+
+export interface ProjectRecord {
+  id: string;
+  name: string;
+  code: string;
+  clientName?: string;
+  description: string;
+  active: boolean;
+  assignedTeamIds: string[];
+  addedEmployeeIds: string[];
+  excludedEmployeeIds: string[];
+  currentFormVersionId: string;
+  currentFormVersionNumber: number;
+  formVersions: ProjectFormVersion[];
+  createdAt: string;
+  createdByName: string;
+  updatedAt: string;
 }

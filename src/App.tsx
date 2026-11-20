@@ -11,10 +11,13 @@ import {
   AuditLogEntry,
   CompanyRecord,
   CorrectionRequest,
+  CustomFieldValue,
   EmployeeScheduleConfig,
   EmployeeShiftState,
+  FormTemplate,
   GlobalAdminConfig,
   LeaveRecord,
+  LeaveStatus,
   ManagedEmployee,
   NavModuleId,
   OutingAuthorizationRequest,
@@ -22,6 +25,8 @@ import {
   PauseSlot,
   Permission,
   ProductionObjective,
+  ProjectFormField,
+  ProjectRecord,
   QualityControlRecord,
   QualityCriterionConfig,
   QualityCriterionResult,
@@ -52,6 +57,7 @@ import { ProfileView } from './components/profile/ProfileView';
 import { ManagementDashboard } from './components/management/ManagementDashboard';
 import { EmployeesTeamsView } from './components/management/EmployeesTeamsView';
 import { CompaniesTasksView } from './components/management/CompaniesTasksView';
+import { ProjectsManagementView } from './components/management/ProjectsManagementView';
 import { SchedulesOutingsView } from './components/management/SchedulesOutingsView';
 import { QualityControlView } from './components/management/QualityControlView';
 import { ObjectivesStatsView } from './components/management/ObjectivesStatsView';
@@ -91,6 +97,15 @@ export default function App() {
   const [tasks, setTasks] = useState<TaskRecord[]>(() => storageService.getTasks());
   const [companyTaskMap, setCompanyTaskMap] = useState<Record<string, string[]>>(() =>
     storageService.getCompanyTaskMap()
+  );
+  const [allProjects, setAllProjects] = useState<ProjectRecord[]>(() =>
+    storageService.getProjects()
+  );
+  const [formTemplates, setFormTemplates] = useState<FormTemplate[]>(() =>
+    storageService.getFormTemplates()
+  );
+  const [treatmentActivities, setTreatmentActivities] = useState(() =>
+    storageService.getAllTreatmentActivities()
   );
   const [employees, setEmployees] = useState<ManagedEmployee[]>(() =>
     storageService.getEmployees()
@@ -158,6 +173,9 @@ export default function App() {
     setCompanies(storageService.getCompanies());
     setTasks(storageService.getTasks());
     setCompanyTaskMap(storageService.getCompanyTaskMap());
+    setAllProjects(storageService.getProjects());
+    setFormTemplates(storageService.getFormTemplates());
+    setTreatmentActivities(storageService.getAllTreatmentActivities());
     setEmployees(storageService.getEmployees());
     setTeams(storageService.getTeams());
     setReferenceTimes(storageService.getReferenceTimes());
@@ -228,9 +246,9 @@ export default function App() {
     setNowMs(clockService.nowMs());
   };
 
-  const handleStartTreatment = (): string | null => {
+  const handleStartTreatment = (projectId?: string): string | null => {
     if (!currentUser || currentUser.role !== 'employee') return null;
-    const res = storageService.startTreatmentSession(currentUser.id);
+    const res = storageService.startTreatmentSession(currentUser.id, projectId);
     setShiftState(res.shiftState);
     if (!res.error) setLastSavedActivity(null);
     setNowMs(clockService.nowMs());
@@ -270,6 +288,7 @@ export default function App() {
     recipientEmail?: string;
     teamsRequesterName?: string;
     customReason?: string;
+    customResponses?: Record<string, CustomFieldValue>;
   }) => {
     if (!currentUser || currentUser.role !== 'employee') return;
     const updated = storageService.updateActiveTimerFields(currentUser.id, patch);
@@ -289,6 +308,7 @@ export default function App() {
     }
     setActivities(storageService.getActivitiesForUser(currentUser.id));
     setQualityControls(storageService.getQualityControls());
+    setTreatmentActivities(storageService.getAllTreatmentActivities());
     setEmployees(storageService.getEmployees());
     setLastSavedActivity(savedRecord);
     setNowMs(clockService.nowMs());
@@ -361,6 +381,9 @@ export default function App() {
     const res = await storageService.createManagedUser(input, currentUser);
     setEmployees(res.users);
     setSchedules(storageService.getSchedules());
+    if (!res.error) {
+      setAllProjects(storageService.getProjects());
+    }
     setAuditLogs(storageService.getAuditLogs());
     return res.error
       ? { error: res.error }
@@ -409,12 +432,15 @@ export default function App() {
         | 'accountStatus'
       >
     >,
-    options?: { newPassword?: string; reason?: string }
+    options?: { newPassword?: string; reason?: string; assignedProjectIds?: string[] }
   ): Promise<{ error?: string }> => {
     if (!currentUser) return { error: 'Session expirée.' };
     const res = await storageService.updateManagedUser(userId, patch, currentUser, options);
     setEmployees(res.users);
     setSchedules(storageService.getSchedules());
+    if (!res.error) {
+      setAllProjects(storageService.getProjects());
+    }
     setAuditLogs(storageService.getAuditLogs());
     if (!res.error && userId === currentUser.id) {
       const refreshedSession = storageService.getSessionUser();
@@ -563,6 +589,8 @@ export default function App() {
     endDate: string;
     startTime: string;
     endTime: string;
+    motif?: string;
+    status: LeaveStatus;
   }): { error?: string } => {
     if (!currentUser) return { error: 'Session expirée.' };
     const res = storageService.createLeave(input, currentUser);
@@ -579,6 +607,8 @@ export default function App() {
       endDate: string;
       startTime: string;
       endTime: string;
+      motif?: string;
+      status: LeaveStatus;
     }
   ): { error?: string } => {
     if (!currentUser) return { error: 'Session expirée.' };
@@ -589,12 +619,114 @@ export default function App() {
     return res.error ? { error: res.error } : {};
   };
 
-  const handleCancelLeave = (leaveId: string, reason?: string): { error?: string } => {
+  const handleUpdateLeaveStatus = (leaveId: string, status: LeaveStatus): { error?: string } => {
     if (!currentUser) return { error: 'Session expirée.' };
-    const res = storageService.cancelLeave(leaveId, currentUser, reason);
+    const res = storageService.updateLeaveStatus(leaveId, status, currentUser);
     setLeaves(res.leaves);
     setAuditLogs(storageService.getAuditLogs());
     if (!res.error) setPlanningRevision((r) => r + 1);
+    return res.error ? { error: res.error } : {};
+  };
+
+  const handleCreateProject = (input: {
+    name: string;
+    code?: string;
+    description?: string;
+    templateId?: string;
+    fields?: ProjectFormField[];
+    assignedTeamIds?: string[];
+    addedEmployeeIds?: string[];
+  }): { created?: ProjectRecord; error?: string } => {
+    if (!currentUser) return { error: 'Session expirée.' };
+    const res = storageService.createProject(input, currentUser);
+    setAllProjects(res.projects);
+    setAuditLogs(storageService.getAuditLogs());
+    return { created: res.created, error: res.error };
+  };
+
+  const handleUpdateProjectInfo = (
+    projectId: string,
+    patch: { name: string; code: string; description: string }
+  ): { error?: string } => {
+    if (!currentUser) return { error: 'Session expirée.' };
+    const res = storageService.updateProjectInfo(projectId, patch, currentUser);
+    setAllProjects(res.projects);
+    setAuditLogs(storageService.getAuditLogs());
+    return res.error ? { error: res.error } : {};
+  };
+
+  const handleToggleProjectActive = (projectId: string, active: boolean): { error?: string } => {
+    if (!currentUser) return { error: 'Session expirée.' };
+    const res = storageService.toggleProjectActive(projectId, active, currentUser);
+    setAllProjects(res.projects);
+    setAuditLogs(storageService.getAuditLogs());
+    return res.error ? { error: res.error } : {};
+  };
+
+  const handleUpdateProjectAssignments = (
+    projectId: string,
+    payload: {
+      assignedTeamIds: string[];
+      addedEmployeeIds: string[];
+      excludedEmployeeIds: string[];
+    }
+  ): { error?: string } => {
+    if (!currentUser) return { error: 'Session expirée.' };
+    const res = storageService.updateProjectAssignments(projectId, payload, currentUser);
+    setAllProjects(res.projects);
+    setAuditLogs(storageService.getAuditLogs());
+    return res.error ? { error: res.error } : {};
+  };
+
+  const handleToggleEmployeeProjectAssignment = (
+    projectId: string,
+    employeeId: string,
+    assigned: boolean
+  ): { error?: string } => {
+    if (!currentUser) return { error: 'Session expirée.' };
+    const res = storageService.toggleEmployeeAssignmentOnProject(
+      projectId,
+      employeeId,
+      assigned,
+      currentUser
+    );
+    setAllProjects(res.projects);
+    setAuditLogs(storageService.getAuditLogs());
+    return res.error ? { error: res.error } : {};
+  };
+
+  const handlePublishProjectFormVersion = (
+    projectId: string,
+    fields: ProjectFormField[],
+    options: { sourceTemplateId?: string; sourceTemplateName?: string; changeNote?: string }
+  ): { error?: string } => {
+    if (!currentUser) return { error: 'Session expirée.' };
+    const res = storageService.publishProjectFormVersion(projectId, fields, options, currentUser);
+    setAllProjects(res.projects);
+    setAuditLogs(storageService.getAuditLogs());
+    return res.error ? { error: res.error } : {};
+  };
+
+  const handleCreateFormTemplate = (input: {
+    name: string;
+    description?: string;
+    fields: ProjectFormField[];
+  }): { error?: string } => {
+    if (!currentUser) return { error: 'Session expirée.' };
+    const res = storageService.createFormTemplate(input, currentUser);
+    setFormTemplates(res.templates);
+    setAuditLogs(storageService.getAuditLogs());
+    return res.error ? { error: res.error } : {};
+  };
+
+  const handleUpdateFormTemplate = (
+    templateId: string,
+    input: { name: string; description?: string; fields: ProjectFormField[] }
+  ): { error?: string } => {
+    if (!currentUser) return { error: 'Session expirée.' };
+    const res = storageService.updateFormTemplate(templateId, input, currentUser);
+    setFormTemplates(res.templates);
+    setAuditLogs(storageService.getAuditLogs());
     return res.error ? { error: res.error } : {};
   };
 
@@ -649,7 +781,13 @@ export default function App() {
     currentUser.role === 'employee' ? storageService.getUsedPauseSlotsToday(currentUser.id) : {};
   const userOutingRequests = outingRequests.filter((r) => r.userId === currentUser.id);
   const userCorrectionRequests = correctionRequests.filter((r) => r.employeeId === currentUser.id);
-  const myLeaves = (void planningRevision, storageService.getMyValidatedLeaves(currentUser.id));
+  const myLeaves =
+    (void planningRevision, void leaves, storageService.getMyLeaves(currentUser.id));
+  const userProjects =
+    (void allProjects,
+    void employees,
+    void teams,
+    storageService.getProjectsForUser(currentUser));
 
   return (
     <AppShell
@@ -684,9 +822,8 @@ export default function App() {
             <EmployeeTreatmentView
               shiftState={shiftState}
               nowMs={nowMs}
-              companies={companies}
-              tasks={tasks}
-              companyTaskMap={companyTaskMap}
+              projects={userProjects}
+              allProjectsCount={allProjects.length}
               lastSavedActivity={lastSavedActivity}
               onStartTreatment={handleStartTreatment}
               onUpdateTimerFields={handleUpdateTimerFields}
@@ -725,6 +862,7 @@ export default function App() {
               activities={activities}
               qualityControls={qualityControls}
               referenceTimes={referenceTimes}
+              projects={allProjects}
               livePresenceSeconds={livePresenceSeconds}
               liveProductiveSeconds={liveProductiveSeconds}
               livePauseSeconds={livePauseSeconds}
@@ -756,6 +894,7 @@ export default function App() {
               user={currentUser}
               employees={employees}
               teams={teams}
+              projects={userProjects}
               companies={companies}
               correctionRequests={correctionRequests}
               qualityControls={qualityControls}
@@ -781,6 +920,23 @@ export default function App() {
               onToggleTaskForCompany={handleToggleTaskForCompany}
             />
           )}
+          {safeModule === 'mgmt_projects' && (
+            <ProjectsManagementView
+              user={currentUser}
+              projects={userProjects}
+              formTemplates={formTemplates}
+              employees={employees}
+              teams={teams}
+              onCreateProject={handleCreateProject}
+              onUpdateProjectInfo={handleUpdateProjectInfo}
+              onToggleProjectActive={handleToggleProjectActive}
+              onUpdateProjectAssignments={handleUpdateProjectAssignments}
+              onToggleEmployeeProjectAssignment={handleToggleEmployeeProjectAssignment}
+              onPublishProjectFormVersion={handlePublishProjectFormVersion}
+              onCreateFormTemplate={handleCreateFormTemplate}
+              onUpdateFormTemplate={handleUpdateFormTemplate}
+            />
+          )}
           {safeModule === 'mgmt_schedules' && (
             <SchedulesOutingsView
               user={currentUser}
@@ -804,7 +960,7 @@ export default function App() {
               leaves={leaves}
               onCreateLeave={handleCreateLeave}
               onUpdateLeave={handleUpdateLeave}
-              onCancelLeave={handleCancelLeave}
+              onUpdateLeaveStatus={handleUpdateLeaveStatus}
             />
           )}
           {safeModule === 'mgmt_quality' && (
@@ -813,6 +969,7 @@ export default function App() {
               qualityControls={qualityControls}
               qualityCriteria={qualityCriteria}
               companies={companies}
+              projects={allProjects}
               employees={employees}
               onEvaluateQc={handleEvaluateQc}
               onAddCriterion={handleAddCriterion}
@@ -826,6 +983,8 @@ export default function App() {
               teams={teams}
               companies={companies}
               tasks={tasks}
+              projects={allProjects}
+              treatmentActivities={treatmentActivities}
               referenceTimes={referenceTimes}
               objectives={objectives}
               qualityControls={qualityControls}
@@ -841,6 +1000,7 @@ export default function App() {
               teams={teams}
               companies={companies}
               tasks={tasks}
+              projects={allProjects}
               qualityControls={qualityControls}
             />
           )}

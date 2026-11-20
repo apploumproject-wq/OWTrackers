@@ -22,6 +22,7 @@ import {
   X,
   ChevronRight,
   Info,
+  FolderKanban,
 } from 'lucide-react';
 import { AppUser, NavModuleId, Permission } from '../../core/types';
 import { getNavItemsForRole, ROLE_LABELS } from '../../core/permissions';
@@ -48,6 +49,7 @@ const MODULE_ICONS: Record<NavModuleId, React.ComponentType<{ className?: string
   mgmt_employees: Users,
   mgmt_teams: Users,
   mgmt_clients: Building2,
+  mgmt_projects: FolderKanban,
   mgmt_tasks: ClipboardList,
   mgmt_schedules: CalendarClock,
   mgmt_leaves: CalendarCheck2,
@@ -224,7 +226,11 @@ export function AppShell({
           </div>
         </header>
 
-        <main className="flex-1 px-4 sm:px-6 lg:px-8 py-6 sm:py-8 max-w-[1400px] w-full mx-auto">
+        <main
+          className={`flex-1 px-4 sm:px-6 lg:px-8 py-6 sm:py-8 w-full mx-auto ${
+            activeModule === 'planning' ? 'max-w-[1760px]' : 'max-w-[1400px]'
+          }`}
+        >
           {children}
         </main>
 

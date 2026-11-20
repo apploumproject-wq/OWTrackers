@@ -4,6 +4,7 @@ import {
   CompanyRecord,
   AppUser,
   ManagedEmployee,
+  ProjectRecord,
   QualityControlRecord,
   TaskRecord,
   TeamRecord,
@@ -29,6 +30,7 @@ interface ReportsViewProps {
   teams: TeamRecord[];
   companies: CompanyRecord[];
   tasks: TaskRecord[];
+  projects: ProjectRecord[];
   qualityControls: QualityControlRecord[];
 }
 
@@ -38,6 +40,7 @@ export function ReportsView({
   teams,
   companies,
   tasks,
+  projects,
   qualityControls,
 }: ReportsViewProps) {
   const isSupervisor = user.role === 'supervisor';
@@ -47,6 +50,7 @@ export function ReportsView({
   const [startYmd, setStartYmd] = useState('');
   const [endYmd, setEndYmd] = useState('');
   const [teamFilter, setTeamFilter] = useState(isSupervisor && user.teamId ? user.teamId : 'all');
+  const [projectFilter, setProjectFilter] = useState('all');
   const [companyFilter, setCompanyFilter] = useState('all');
   const [taskFilter, setTaskFilter] = useState('all');
   const [employeeFilter, setEmployeeFilter] = useState('all');
@@ -54,10 +58,30 @@ export function ReportsView({
   const now = useMemo(() => new Date(), []);
   const todayYmd = toYmd(now);
 
+  const projectOptions = useMemo(() => {
+    const map = new Map<string, { id: string; name: string; active: boolean }>();
+    for (const p of projects) {
+      map.set(p.id, { id: p.id, name: p.name, active: p.active });
+    }
+    for (const q of qualityControls) {
+      if (q.projectId && !map.has(q.projectId)) {
+        map.set(q.projectId, {
+          id: q.projectId,
+          name: q.projectName ?? q.projectId,
+          active: false,
+        });
+      }
+    }
+    return Array.from(map.values());
+  }, [projects, qualityControls]);
+
   const filteredRows = useMemo(() => {
     return qualityControls.filter((q) => {
       if (isSupervisor && user.teamId && q.teamId !== user.teamId) return false;
       if (teamFilter !== 'all' && q.teamId !== teamFilter) return false;
+      if (projectFilter === 'none' && q.projectId) return false;
+      if (projectFilter !== 'all' && projectFilter !== 'none' && q.projectId !== projectFilter)
+        return false;
       if (companyFilter !== 'all' && q.companyId !== companyFilter) return false;
       if (taskFilter !== 'all' && q.taskId !== taskFilter) return false;
       if (employeeFilter !== 'all' && q.employeeId !== employeeFilter) return false;
@@ -75,6 +99,7 @@ export function ReportsView({
     isSupervisor,
     user.teamId,
     teamFilter,
+    projectFilter,
     companyFilter,
     taskFilter,
     employeeFilter,
@@ -85,30 +110,82 @@ export function ReportsView({
     endYmd,
   ]);
 
-  const exportHeaders = [
-    'Dossier',
-    'Collaborateur',
-    'Equipe',
-    'Societe',
-    'Tache',
-    'Duree',
-    'Statut qualite',
-    'Controleur',
-  ];
+  // Colonnes spécifiques au projet sélectionné (jamais mélangées entre projets)
+  const selectedProjectColumns = useMemo(() => {
+    if (projectFilter === 'all' || projectFilter === 'none') return [];
+    const byLabel = new Map<string, { label: string; fieldIds: Set<string> }>();
+    const proj = projects.find((p) => p.id === projectFilter);
+    if (proj) {
+      for (const ver of proj.formVersions) {
+        for (const f of ver.fields) {
+          const norm = f.label.trim().toLowerCase();
+          const ex = byLabel.get(norm);
+          if (ex) ex.fieldIds.add(f.id);
+          else byLabel.set(norm, { label: f.label.trim(), fieldIds: new Set([f.id]) });
+        }
+      }
+    }
+    for (const q of filteredRows) {
+      for (const f of q.formFieldsSnapshot ?? []) {
+        const norm = f.label.trim().toLowerCase();
+        const ex = byLabel.get(norm);
+        if (ex) ex.fieldIds.add(f.id);
+        else byLabel.set(norm, { label: f.label.trim(), fieldIds: new Set([f.id]) });
+      }
+    }
+    return Array.from(byLabel.values());
+  }, [projectFilter, projects, filteredRows]);
+
+  const exportHeaders = useMemo(
+    () => [
+      'Dossier',
+      'Collaborateur',
+      'Equipe',
+      'Projet',
+      'Version',
+      'Societe',
+      'Tache',
+      'Duree',
+      'Statut qualite',
+      'Controleur',
+      ...selectedProjectColumns.map((c) => c.label),
+    ],
+    [selectedProjectColumns]
+  );
 
   const exportMatrix: (string | number)[][] = useMemo(
     () =>
-      filteredRows.map((q) => [
-        q.dossierRef,
-        q.employeeName,
-        teams.find((t) => t.id === q.teamId)?.name ?? q.teamId,
-        q.companyName,
-        q.taskName,
-        formatDurationHM(q.durationSeconds),
-        QUALITY_STATUS_LABELS[q.status],
-        q.controllerName ?? 'Non controle',
-      ]),
-    [filteredRows, teams]
+      filteredRows.map((q) => {
+        const base: (string | number)[] = [
+          q.dossierRef || '—',
+          q.employeeName,
+          teams.find((t) => t.id === q.teamId)?.name ?? q.teamId,
+          q.projectName ?? 'Sans projet',
+          q.formVersionNumber ? `v${q.formVersionNumber}` : '—',
+          q.companyName || '—',
+          q.taskName || '—',
+          formatDurationHM(q.durationSeconds),
+          QUALITY_STATUS_LABELS[q.status],
+          q.controllerName ?? 'Non controle',
+        ];
+        for (const col of selectedProjectColumns) {
+          let cellVal = '—';
+          if (q.customResponses) {
+            for (const fid of col.fieldIds) {
+              const raw = q.customResponses[fid];
+              if (raw !== undefined) {
+                cellVal = Array.isArray(raw)
+                  ? raw.join(', ') || '—'
+                  : String(raw).trim() || '—';
+                break;
+              }
+            }
+          }
+          base.push(cellVal);
+        }
+        return base;
+      }),
+    [filteredRows, teams, selectedProjectColumns]
   );
 
   const stamp = toYmd(now);
@@ -122,7 +199,12 @@ export function ReportsView({
             <button
               type="button"
               onClick={() =>
-                downloadExcel(`owtrackers-rapport-${stamp}.xls`, 'Rapport OWTrackers', exportHeaders, exportMatrix)
+                downloadExcel(
+                  `owtrackers-rapport-${stamp}.xls`,
+                  'Rapport OWTrackers',
+                  exportHeaders,
+                  exportMatrix
+                )
               }
               className="inline-flex items-center gap-1.5 px-3.5 py-2 bg-[#A83CE2] hover:bg-[#7624A8] text-white text-xs font-semibold rounded-lg cursor-pointer"
             >
@@ -160,7 +242,7 @@ export function ReportsView({
       />
 
       <section className="bg-white dark:bg-[#292631] border border-slate-200 dark:border-[#393342] rounded-lg p-4 space-y-3">
-        <div className="grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-5 gap-3">
+        <div className="grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-6 gap-3">
           <select
             value={period}
             onChange={(e) => setPeriod(e.target.value as typeof period)}
@@ -188,6 +270,20 @@ export function ReportsView({
               ))}
             </select>
           )}
+
+          <select
+            value={projectFilter}
+            onChange={(e) => setProjectFilter(e.target.value)}
+            className="px-3 py-2 text-xs border border-slate-300 dark:border-[#393342] rounded-lg bg-white dark:bg-[#211E27] text-slate-900 dark:text-white focus:outline-none focus:border-[#A83CE2]"
+          >
+            <option value="all">Tous projets</option>
+            <option value="none">Sans projet (historique)</option>
+            {projectOptions.map((p) => (
+              <option key={p.id} value={p.id}>
+                {p.name} {!p.active ? '(désactivé)' : ''}
+              </option>
+            ))}
+          </select>
 
           <select
             value={companyFilter}

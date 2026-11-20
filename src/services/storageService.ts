@@ -7,22 +7,27 @@ import {
   AuthorizationStatus,
   CompanyRecord,
   CorrectionRequest,
+  CustomFieldValue,
   EmployeeScheduleConfig,
   EmployeeShiftState,
+  FormTemplate,
   GlobalAdminConfig,
   LeaveActionTrace,
   LeaveRecord,
+  LeaveStatus,
   ManagedEmployee,
-  MyValidatedLeaveItem,
+  MyLeaveItem,
   OutingAuthorizationRequest,
   OutingReason,
   PauseSlot,
   Permission,
   PlanningDisplayRow,
-  PlanningLeaveOverlay,
   PlanningManualRow,
   PlanningWeekData,
   ProductionObjective,
+  ProjectFormField,
+  ProjectFormVersion,
+  ProjectRecord,
   QualityControlRecord,
   QualityCriterionConfig,
   QualityCriterionResult,
@@ -38,6 +43,7 @@ import {
 import {
   BASE_ROLE_PERMISSIONS,
   hasPermission,
+  LEAVE_STATUS_LABELS,
   OUTING_REASON_CONFIG,
   PAUSE_SLOT_LABELS,
   ROLE_LABELS,
@@ -48,6 +54,7 @@ import {
   INITIAL_ADMIN_CONFIG,
   INITIAL_COMPANIES,
   INITIAL_COMPANY_TASK_MAP,
+  INITIAL_FORM_TEMPLATES,
   INITIAL_QUALITY_CRITERIA,
   INITIAL_REFERENCE_TIMES,
   INITIAL_TASKS,
@@ -59,7 +66,6 @@ import {
   verifyPassword,
 } from '../utils/crypto';
 import {
-  enumerateYmdRange,
   formatYmdFr,
   generateUniqueId,
   getMondayOfWeekYmd,
@@ -67,7 +73,6 @@ import {
   isSameDayYmd,
   isValidHHmm,
   isValidYmd,
-  toLocalDateTimeInputValue,
   toYmd,
 } from '../utils/formatters';
 
@@ -101,8 +106,9 @@ const STORAGE_KEYS = {
   QUALITY_CONTROLS: 'owtrackers_qc_records_v2',
   CORRECTION_REQUESTS: 'owtrackers_correction_requests_v2',
   AUDIT_LOGS: 'owtrackers_audit_logs_v2',
+  PROJECTS: 'owtrackers_projects_v1',
+  FORM_TEMPLATES: 'owtrackers_form_templates_v1',
   LEAVES: 'owtrackers_leaves_v1',
-  PLANNING_LEAVE_META: 'owtrackers_planning_leave_meta_v1',
   PLANNING_MANUAL_ROWS: 'owtrackers_planning_manual_rows_v1',
   PLANNING_DAY_ROW_COUNTS: 'owtrackers_planning_day_counts_v1',
   PLANNING_ACCESS_USERS: 'owtrackers_planning_access_users_v1',
@@ -219,6 +225,7 @@ export interface CreateUserInput {
   plannedEnd?: string;
   restDays?: string[];
   dailyTargetDossiers?: number;
+  assignedProjectIds?: string[];
 }
 
 export interface ExcelImportCreatedAccount {
@@ -826,6 +833,13 @@ export const storageService = {
       }
     }
 
+    if (input.assignedProjectIds !== undefined) {
+      const projAssignErr = this._validateRequestedProjectIds(input.assignedProjectIds, actor);
+      if (projAssignErr) {
+        return { users: accounts, error: projAssignErr };
+      }
+    }
+
     const provisionalPassword =
       !hasCustomPassword && finalMatricule
         ? buildProvisionalPassword(finalMatricule)
@@ -880,6 +894,13 @@ export const storageService = {
           isCustom: false,
         },
       ]);
+    }
+
+    if (
+      input.assignedProjectIds !== undefined &&
+      (created.role === 'employee' || created.role === 'supervisor')
+    ) {
+      this._syncUserProjectAssignments(created, input.assignedProjectIds, actor);
     }
 
     const displayId = created.username ?? created.matricule ?? '—';
@@ -1061,12 +1082,19 @@ export const storageService = {
       >
     >,
     actor: AppUser,
-    options?: { newPassword?: string; reason?: string }
+    options?: { newPassword?: string; reason?: string; assignedProjectIds?: string[] }
   ): Promise<{ users: ManagedEmployee[]; error?: string }> {
     const list = this.getUsers();
     const existing = list.find((e) => e.id === userId);
     if (!existing) {
       return { users: list, error: 'Compte introuvable.' };
+    }
+
+    if (options?.assignedProjectIds !== undefined) {
+      const projAssignErr = this._validateRequestedProjectIds(options.assignedProjectIds, actor);
+      if (projAssignErr) {
+        return { users: list, error: projAssignErr };
+      }
     }
 
     if (existing.role === 'admin' && actor.role !== 'admin') {
@@ -1285,6 +1313,13 @@ export const storageService = {
 
     const next = list.map((e) => (e.id === existing.id ? updated : e));
     safeWriteJson(STORAGE_KEYS.ACCOUNTS, next);
+
+    if (
+      options?.assignedProjectIds !== undefined &&
+      (updated.role === 'employee' || updated.role === 'supervisor')
+    ) {
+      this._syncUserProjectAssignments(updated, options.assignedProjectIds, actor);
+    }
 
     const teamName = this.getTeams().find((t) => t.id === updated.teamId)?.name ?? '';
     const schedules = this.getSchedules();
@@ -1628,8 +1663,13 @@ export const storageService = {
     const created: CorrectionRequest = {
       id: generateUniqueId('corr'),
       activityId: payload.activity.id,
-      dossierRef: payload.activity.dossierRef,
-      activityLabel: payload.activity.taskTitle,
+      dossierRef:
+        payload.activity.dossierRef ||
+        (payload.activity.formVersionNumber
+          ? `v${payload.activity.formVersionNumber}`
+          : '—'),
+      activityLabel:
+        payload.activity.taskTitle || payload.activity.projectName || 'Traitement',
       employeeId: payload.user.id,
       employeeName: payload.user.fullName,
       teamId: payload.user.teamId ?? '',
@@ -1929,8 +1969,24 @@ export const storageService = {
   },
 
   _readAllLeavesRaw(): LeaveRecord[] {
-    const existing = safeReadJson<LeaveRecord[]>(STORAGE_KEYS.LEAVES);
-    if (existing && Array.isArray(existing)) return existing;
+    const existing = safeReadJson<Array<LeaveRecord & { status: string; validatedAt?: string }>>(
+      STORAGE_KEYS.LEAVES
+    );
+    if (existing && Array.isArray(existing)) {
+      return existing.map((lv) => {
+        const normalizedStatus: LeaveStatus =
+          lv.status === 'en_attente' || lv.status === 'valide' || lv.status === 'refuse'
+            ? lv.status
+            : lv.status === 'annule'
+            ? 'refuse'
+            : 'en_attente';
+        return {
+          ...lv,
+          status: normalizedStatus,
+          createdAt: lv.createdAt ?? lv.validatedAt ?? clockService.nowIso(),
+        };
+      });
+    }
     safeWriteJson(STORAGE_KEYS.LEAVES, []);
     return [];
   },
@@ -1953,7 +2009,9 @@ export const storageService = {
         : all;
 
     return {
-      leaves: [...filtered].sort((a, b) => b.validatedAt.localeCompare(a.validatedAt)),
+      leaves: [...filtered].sort((a, b) =>
+        (b.createdAt ?? b.validatedAt ?? '').localeCompare(a.createdAt ?? a.validatedAt ?? '')
+      ),
     };
   },
 
@@ -1964,6 +2022,8 @@ export const storageService = {
       endDate: string;
       startTime: string;
       endTime: string;
+      motif?: string;
+      status?: LeaveStatus;
     },
     actor: AppUser
   ): { leaves: LeaveRecord[]; created?: LeaveRecord; error?: string } {
@@ -1974,7 +2034,7 @@ export const storageService = {
     if (!actorAccount || actorAccount.accountStatus !== 'actif' || !this.canUserManageLeaves(actor)) {
       return {
         leaves: currentScoped,
-        error: 'Vous n’êtes pas autorisé à enregistrer ou valider des congés.',
+        error: 'Vous n’êtes pas autorisé à enregistrer des demandes de congé.',
       };
     }
 
@@ -1998,6 +2058,11 @@ export const storageService = {
     const endDate = input.endDate.trim();
     const startTime = input.startTime.trim();
     const endTime = input.endTime.trim();
+    const cleanMotif = input.motif?.trim() || undefined;
+    const status: LeaveStatus =
+      input.status === 'valide' || input.status === 'refuse' || input.status === 'en_attente'
+        ? input.status
+        : 'en_attente';
 
     if (!isValidYmd(startDate) || !isValidYmd(endDate)) {
       return {
@@ -2025,20 +2090,22 @@ export const storageService = {
     }
 
     const allLeaves = this._readAllLeavesRaw();
-    const hasConflict = allLeaves.some(
-      (existing) =>
-        existing.status === 'valide' &&
-        existing.employeeId === target.id &&
-        existing.startDate <= endDate &&
-        startDate <= existing.endDate &&
-        existing.startTime < endTime &&
-        startTime < existing.endTime
-    );
-    if (hasConflict) {
-      return {
-        leaves: currentScoped,
-        error: 'Un congé validé existe déjà pour cet employé sur ce créneau.',
-      };
+    if (status === 'valide') {
+      const hasConflict = allLeaves.some(
+        (existing) =>
+          existing.status === 'valide' &&
+          existing.employeeId === target.id &&
+          existing.startDate <= endDate &&
+          startDate <= existing.endDate &&
+          existing.startTime < endTime &&
+          startTime < existing.endTime
+      );
+      if (hasConflict) {
+        return {
+          leaves: currentScoped,
+          error: 'Un congé validé existe déjà pour cet employé sur ce créneau.',
+        };
+      }
     }
 
     const nowIso = clockService.nowIso();
@@ -2049,12 +2116,15 @@ export const storageService = {
 
     const trace: LeaveActionTrace = {
       id: generateUniqueId('lvt'),
-      action: 'validation',
+      action: 'creation',
       actorId: actorAccount.id,
       actorName: actorAccount.fullName,
       actorRole: actorAccount.role,
       timestamp: nowIso,
-      details: `Congé validé : ${periodLabel}`,
+      newStatus: status,
+      details: `Demande enregistrée (${LEAVE_STATUS_LABELS[status]}) : ${periodLabel}${
+        cleanMotif ? ` · Motif : ${cleanMotif}` : ''
+      }`,
     };
 
     const created: LeaveRecord = {
@@ -2066,11 +2136,13 @@ export const storageService = {
       endDate,
       startTime,
       endTime,
-      status: 'valide',
+      motif: cleanMotif,
+      status,
       createdById: actorAccount.id,
       createdByName: actorAccount.fullName,
       createdByRole: actorAccount.role,
-      validatedAt: nowIso,
+      createdAt: nowIso,
+      validatedAt: status === 'valide' ? nowIso : undefined,
       history: [trace],
     };
 
@@ -2079,9 +2151,10 @@ export const storageService = {
 
     this.appendAuditLog(
       actor,
-      `Congé validé · ${target.fullName} (${target.matricule ?? '—'})`,
+      `Congé (${LEAVE_STATUS_LABELS[status]}) · ${target.fullName} (${target.matricule ?? '—'})`,
       '—',
-      periodLabel
+      periodLabel,
+      cleanMotif
     );
 
     return {
@@ -2097,6 +2170,8 @@ export const storageService = {
       endDate: string;
       startTime: string;
       endTime: string;
+      motif?: string;
+      status: LeaveStatus;
     },
     actor: AppUser
   ): { leaves: LeaveRecord[]; updated?: LeaveRecord; error?: string } {
@@ -2107,17 +2182,14 @@ export const storageService = {
     if (!actorAccount || actorAccount.accountStatus !== 'actif' || !this.canUserManageLeaves(actor)) {
       return {
         leaves: currentScoped,
-        error: 'Vous n’êtes pas autorisé à modifier des congés.',
+        error: 'Vous n’êtes pas autorisé à modifier les demandes de congé.',
       };
     }
 
     const allLeaves = this._readAllLeavesRaw();
     const existing = allLeaves.find((l) => l.id === leaveId);
     if (!existing) {
-      return { leaves: currentScoped, error: 'Congé introuvable.' };
-    }
-    if (existing.status !== 'valide') {
-      return { leaves: currentScoped, error: 'Un congé annulé ne peut plus être modifié.' };
+      return { leaves: currentScoped, error: 'Demande de congé introuvable.' };
     }
 
     const target = accounts.find((u) => u.id === existing.employeeId);
@@ -2136,6 +2208,11 @@ export const storageService = {
     const endDate = patch.endDate.trim();
     const startTime = patch.startTime.trim();
     const endTime = patch.endTime.trim();
+    const cleanMotif = patch.motif?.trim() || undefined;
+    const nextStatus: LeaveStatus =
+      patch.status === 'valide' || patch.status === 'refuse' || patch.status === 'en_attente'
+        ? patch.status
+        : existing.status;
 
     if (!isValidYmd(startDate) || !isValidYmd(endDate)) {
       return {
@@ -2162,21 +2239,23 @@ export const storageService = {
       };
     }
 
-    const hasConflict = allLeaves.some(
-      (other) =>
-        other.id !== existing.id &&
-        other.status === 'valide' &&
-        other.employeeId === existing.employeeId &&
-        other.startDate <= endDate &&
-        startDate <= other.endDate &&
-        other.startTime < endTime &&
-        startTime < other.endTime
-    );
-    if (hasConflict) {
-      return {
-        leaves: currentScoped,
-        error: 'Un autre congé validé existe déjà pour cet employé sur ce créneau.',
-      };
+    if (nextStatus === 'valide') {
+      const hasConflict = allLeaves.some(
+        (other) =>
+          other.id !== existing.id &&
+          other.status === 'valide' &&
+          other.employeeId === existing.employeeId &&
+          other.startDate <= endDate &&
+          startDate <= other.endDate &&
+          other.startTime < endTime &&
+          startTime < other.endTime
+      );
+      if (hasConflict) {
+        return {
+          leaves: currentScoped,
+          error: 'Un autre congé validé existe déjà pour cet employé sur ce créneau.',
+        };
+      }
     }
 
     const nowIso = clockService.nowIso();
@@ -2189,14 +2268,45 @@ export const storageService = {
         ? `${formatYmdFr(startDate)} (${startTime}–${endTime})`
         : `${formatYmdFr(startDate)} → ${formatYmdFr(endDate)} (${startTime}–${endTime})`;
 
+    const statusChanged = existing.status !== nextStatus;
+    const fieldsChanged =
+      existing.startDate !== startDate ||
+      existing.endDate !== endDate ||
+      existing.startTime !== startTime ||
+      existing.endTime !== endTime ||
+      (existing.motif ?? '') !== (cleanMotif ?? '');
+
+    const detailParts: string[] = [];
+    if (statusChanged) {
+      detailParts.push(
+        `Statut : ${LEAVE_STATUS_LABELS[existing.status]} → ${LEAVE_STATUS_LABELS[nextStatus]}`
+      );
+    }
+    if (
+      existing.startDate !== startDate ||
+      existing.endDate !== endDate ||
+      existing.startTime !== startTime ||
+      existing.endTime !== endTime
+    ) {
+      detailParts.push(`Période : ${prevLabel} → ${nextLabel}`);
+    }
+    if ((existing.motif ?? '') !== (cleanMotif ?? '')) {
+      detailParts.push(`Motif : ${cleanMotif ?? 'Aucun'}`);
+    }
+    if (detailParts.length === 0) {
+      detailParts.push(`Enregistré (${LEAVE_STATUS_LABELS[nextStatus]})`);
+    }
+
     const trace: LeaveActionTrace = {
       id: generateUniqueId('lvt'),
-      action: 'modification',
+      action: statusChanged && !fieldsChanged ? 'statut' : 'modification',
       actorId: actorAccount.id,
       actorName: actorAccount.fullName,
       actorRole: actorAccount.role,
       timestamp: nowIso,
-      details: `${prevLabel} → ${nextLabel}`,
+      oldStatus: existing.status,
+      newStatus: nextStatus,
+      details: detailParts.join(' · '),
     };
 
     const updated: LeaveRecord = {
@@ -2205,6 +2315,9 @@ export const storageService = {
       endDate,
       startTime,
       endTime,
+      motif: cleanMotif,
+      status: nextStatus,
+      validatedAt: nextStatus === 'valide' ? existing.validatedAt ?? nowIso : existing.validatedAt,
       updatedById: actorAccount.id,
       updatedByName: actorAccount.fullName,
       updatedByRole: actorAccount.role,
@@ -2215,23 +2328,14 @@ export const storageService = {
     const nextAll = allLeaves.map((l) => (l.id === leaveId ? updated : l));
     safeWriteJson(STORAGE_KEYS.LEAVES, nextAll);
 
-    // Nettoyer les métadonnées Planning hors de la nouvelle plage de dates tout en conservant les jours maintenus
-    const overlays = this._readPlanningLeaveOverlays();
-    const cleanedOverlays = overlays.filter(
-      (ov) =>
-        ov.leaveId !== leaveId || (ov.dateYmd >= startDate && ov.dateYmd <= endDate)
-    );
-    if (cleanedOverlays.length !== overlays.length) {
-      safeWriteJson(STORAGE_KEYS.PLANNING_LEAVE_META, cleanedOverlays);
-    }
-
     const empName = target?.fullName ?? existing.employeeNameSnapshot;
     const empMatricule = target?.matricule ?? existing.employeeMatriculeSnapshot;
     this.appendAuditLog(
       actor,
       `Congé modifié · ${empName} (${empMatricule || '—'})`,
-      prevLabel,
-      nextLabel
+      `${LEAVE_STATUS_LABELS[existing.status]} · ${prevLabel}`,
+      `${LEAVE_STATUS_LABELS[nextStatus]} · ${nextLabel}`,
+      cleanMotif
     );
 
     return {
@@ -2240,94 +2344,31 @@ export const storageService = {
     };
   },
 
-  cancelLeave(
+  updateLeaveStatus(
     leaveId: string,
-    actor: AppUser,
-    reason?: string
-  ): { leaves: LeaveRecord[]; error?: string } {
-    const accounts = this.getUsers();
-    const actorAccount = accounts.find((u) => u.id === actor.id);
-    const currentScoped = this.getLeavesForManagement(actor).leaves;
-
-    if (!actorAccount || actorAccount.accountStatus !== 'actif' || !this.canUserManageLeaves(actor)) {
-      return {
-        leaves: currentScoped,
-        error: 'Vous n’êtes pas autorisé à annuler des congés.',
-      };
-    }
-
+    nextStatus: LeaveStatus,
+    actor: AppUser
+  ): { leaves: LeaveRecord[]; updated?: LeaveRecord; error?: string } {
     const allLeaves = this._readAllLeavesRaw();
     const existing = allLeaves.find((l) => l.id === leaveId);
     if (!existing) {
-      return { leaves: currentScoped, error: 'Congé introuvable.' };
-    }
-    if (existing.status === 'annule') {
-      return { leaves: currentScoped, error: 'Ce congé est déjà annulé.' };
-    }
-
-    const target = accounts.find((u) => u.id === existing.employeeId);
-    const teams = this.getTeams();
-    if (
-      actorAccount.role === 'supervisor' &&
-      (!target || !this._isEmployeeInActorLeaveScope(actorAccount, target, accounts, teams))
-    ) {
       return {
-        leaves: currentScoped,
-        error: 'Vous ne pouvez annuler que les congés des employés de votre périmètre.',
+        leaves: this.getLeavesForManagement(actor).leaves,
+        error: 'Demande de congé introuvable.',
       };
     }
-
-    const nowIso = clockService.nowIso();
-    const periodLabel =
-      existing.startDate === existing.endDate
-        ? `${formatYmdFr(existing.startDate)} (${existing.startTime}–${existing.endTime})`
-        : `${formatYmdFr(existing.startDate)} → ${formatYmdFr(existing.endDate)} (${existing.startTime}–${existing.endTime})`;
-    const cleanReason = reason?.trim() || undefined;
-
-    const trace: LeaveActionTrace = {
-      id: generateUniqueId('lvt'),
-      action: 'annulation',
-      actorId: actorAccount.id,
-      actorName: actorAccount.fullName,
-      actorRole: actorAccount.role,
-      timestamp: nowIso,
-      details: cleanReason ? `Congé annulé (${cleanReason})` : 'Congé annulé',
-    };
-
-    const updated: LeaveRecord = {
-      ...existing,
-      status: 'annule',
-      cancelledById: actorAccount.id,
-      cancelledByName: actorAccount.fullName,
-      cancelledByRole: actorAccount.role,
-      cancelledAt: nowIso,
-      cancellationReason: cleanReason,
-      history: [trace, ...(existing.history ?? [])],
-    };
-
-    const nextAll = allLeaves.map((l) => (l.id === leaveId ? updated : l));
-    safeWriteJson(STORAGE_KEYS.LEAVES, nextAll);
-
-    const empName = target?.fullName ?? existing.employeeNameSnapshot;
-    const empMatricule = target?.matricule ?? existing.employeeMatriculeSnapshot;
-    this.appendAuditLog(
-      actor,
-      `Congé annulé · ${empName} (${empMatricule || '—'})`,
-      `Validé · ${periodLabel}`,
-      'Annulé',
-      cleanReason
+    return this.updateLeave(
+      leaveId,
+      {
+        startDate: existing.startDate,
+        endDate: existing.endDate,
+        startTime: existing.startTime,
+        endTime: existing.endTime,
+        motif: existing.motif,
+        status: nextStatus,
+      },
+      actor
     );
-
-    return {
-      leaves: this.getLeavesForManagement(actor).leaves,
-    };
-  },
-
-  _readPlanningLeaveOverlays(): PlanningLeaveOverlay[] {
-    const existing = safeReadJson<PlanningLeaveOverlay[]>(STORAGE_KEYS.PLANNING_LEAVE_META);
-    if (existing && Array.isArray(existing)) return existing;
-    safeWriteJson(STORAGE_KEYS.PLANNING_LEAVE_META, []);
-    return [];
   },
 
   _readPlanningManualRows(): PlanningManualRow[] {
@@ -2344,29 +2385,25 @@ export const storageService = {
     return {};
   },
 
-  getMyValidatedLeaves(userId: string): MyValidatedLeaveItem[] {
+  getMyLeaves(userId: string): MyLeaveItem[] {
     const allLeaves = this._readAllLeavesRaw();
-    const overlays = this._readPlanningLeaveOverlays();
     return allLeaves
-      .filter((l) => l.employeeId === userId && l.status === 'valide')
-      .sort((a, b) => a.startDate.localeCompare(b.startDate))
-      .map((leave) => {
-        const dates = enumerateYmdRange(leave.startDate, leave.endDate);
-        const motifsSet = new Set<string>();
-        for (const d of dates) {
-          const ov = overlays.find((o) => o.leaveId === leave.id && o.dateYmd === d);
-          const clean = ov?.motif?.trim();
-          if (clean) motifsSet.add(clean);
-        }
-        return {
-          id: leave.id,
-          startDate: leave.startDate,
-          endDate: leave.endDate,
-          startTime: leave.startTime,
-          endTime: leave.endTime,
-          motifs: Array.from(motifsSet),
-        };
-      });
+      .filter((l) => l.employeeId === userId)
+      .sort((a, b) => (b.createdAt ?? '').localeCompare(a.createdAt ?? ''))
+      .map((leave) => ({
+        id: leave.id,
+        startDate: leave.startDate,
+        endDate: leave.endDate,
+        startTime: leave.startTime,
+        endTime: leave.endTime,
+        motif: leave.motif,
+        status: leave.status,
+        createdAt: leave.createdAt,
+      }));
+  },
+
+  getMyValidatedLeaves(userId: string): MyLeaveItem[] {
+    return this.getMyLeaves(userId);
   },
 
   getPlanningWeekData(
@@ -2385,46 +2422,16 @@ export const storageService = {
     const weekDays = getWeekDaysYmd(weekStartYmd);
     const weekEndYmd = weekDays[weekDays.length - 1].dateYmd;
 
-    const accounts = this.getUsers();
-    const validatedLeaves = this._readAllLeavesRaw().filter((l) => l.status === 'valide');
-    const overlays = this._readPlanningLeaveOverlays();
     const manualRows = this._readPlanningManualRows();
     const dayCounts = this._readPlanningDayRowCounts();
 
     const days = weekDays.map((day) => {
-      const autoLeavesForDay = validatedLeaves
-        .filter((l) => l.startDate <= day.dateYmd && day.dateYmd <= l.endDate)
-        .map((l) => {
-          const emp = accounts.find((u) => u.id === l.employeeId);
-          const matricule = emp?.matricule?.trim() || l.employeeMatriculeSnapshot || '—';
-          const employeeName = emp?.fullName || l.employeeNameSnapshot || 'Collaborateur';
-          const ov = overlays.find((o) => o.leaveId === l.id && o.dateYmd === day.dateYmd);
-          const row: PlanningDisplayRow = {
-            rowKey: `leave:${l.id}:${day.dateYmd}`,
-            source: 'leave',
-            dateYmd: day.dateYmd,
-            leaveId: l.id,
-            matricule,
-            employeeName,
-            startTime: l.startTime,
-            endTime: l.endTime,
-            motif: ov?.motif ?? '',
-            remplacant: ov?.remplacant ?? '',
-          };
-          return row;
-        })
-        .sort((a, b) => {
-          const tDiff = a.startTime.localeCompare(b.startTime);
-          if (tDiff !== 0) return tDiff;
-          return a.employeeName.localeCompare(b.employeeName, 'fr');
-        });
-
       const manualForDay = manualRows.filter((m) => m.dateYmd === day.dateYmd);
       const highestSlot = manualForDay.reduce((max, r) => Math.max(max, r.slotIndex), -1);
       const storedCount = dayCounts[day.dateYmd] ?? 10;
       const manualRowCount = Math.max(10, storedCount, highestSlot + 1);
 
-      const manualDisplayRows: PlanningDisplayRow[] = Array.from(
+      const rows: PlanningDisplayRow[] = Array.from(
         { length: manualRowCount },
         (_, slotIndex) => {
           const existing = manualForDay.find((m) => m.slotIndex === slotIndex);
@@ -2448,7 +2455,7 @@ export const storageService = {
         dayLabel: day.dayLabel,
         shortDate: day.shortDate,
         manualRowCount,
-        rows: [...autoLeavesForDay, ...manualDisplayRows],
+        rows,
       };
     });
 
@@ -2459,50 +2466,6 @@ export const storageService = {
         days,
       },
     };
-  },
-
-  updatePlanningLeaveOverlay(
-    leaveId: string,
-    dateYmd: string,
-    patch: { motif?: string; remplacant?: string },
-    actor: AppUser
-  ): { error?: string } {
-    if (!this.canUserAccessPlanning(actor)) {
-      return {
-        error: 'Accès refusé : vous n’êtes pas autorisé à modifier le Planning.',
-      };
-    }
-
-    const leave = this._readAllLeavesRaw().find((l) => l.id === leaveId);
-    if (!leave || leave.status !== 'valide') {
-      return { error: 'Ce congé validé est introuvable ou a été annulé.' };
-    }
-    if (!isValidYmd(dateYmd) || dateYmd < leave.startDate || dateYmd > leave.endDate) {
-      return { error: 'Date invalide pour ce congé.' };
-    }
-
-    const overlays = this._readPlanningLeaveOverlays();
-    const key = `${leaveId}__${dateYmd}`;
-    const existing = overlays.find((o) => o.key === key);
-    const nextMotif = patch.motif !== undefined ? patch.motif : existing?.motif ?? '';
-    const nextRemplacant =
-      patch.remplacant !== undefined ? patch.remplacant : existing?.remplacant ?? '';
-
-    const updatedRecord: PlanningLeaveOverlay = {
-      key,
-      leaveId,
-      dateYmd,
-      motif: nextMotif,
-      remplacant: nextRemplacant,
-      updatedAt: clockService.nowIso(),
-      updatedByName: actor.fullName,
-    };
-
-    const next = existing
-      ? overlays.map((o) => (o.key === key ? updatedRecord : o))
-      : [...overlays, updatedRecord];
-    safeWriteJson(STORAGE_KEYS.PLANNING_LEAVE_META, next);
-    return {};
   },
 
   savePlanningManualRow(
@@ -2602,6 +2565,725 @@ export const storageService = {
     });
     void weekStartYmd;
     return { count: nextCount };
+  },
+
+  deletePlanningManualRow(
+    weekStartYmd: string,
+    dateYmd: string,
+    slotIndex: number,
+    actor: AppUser
+  ): { error?: string } {
+    if (!this.canUserAccessPlanning(actor)) {
+      return {
+        error: 'Accès refusé : vous n’êtes pas autorisé à modifier le Planning.',
+      };
+    }
+    if (!isValidYmd(dateYmd) || slotIndex < 0 || !Number.isInteger(slotIndex)) {
+      return { error: 'Ligne de Planning invalide.' };
+    }
+    const all = this._readPlanningManualRows();
+    const counts = this._readPlanningDayRowCounts();
+    const manualForDay = all.filter((m) => m.dateYmd === dateYmd);
+    const highestSlot = manualForDay.reduce((max, r) => Math.max(max, r.slotIndex), -1);
+    const currentCount = Math.max(10, counts[dateYmd] ?? 10, highestSlot + 1);
+
+    if (slotIndex < 10) {
+      const next = all.filter(
+        (r) => !(r.dateYmd === dateYmd && r.slotIndex === slotIndex)
+      );
+      safeWriteJson(STORAGE_KEYS.PLANNING_MANUAL_ROWS, next);
+      return {};
+    }
+
+    const nextRows = all
+      .filter((r) => !(r.dateYmd === dateYmd && r.slotIndex === slotIndex))
+      .map((r) =>
+        r.dateYmd === dateYmd && r.slotIndex > slotIndex
+          ? { ...r, slotIndex: r.slotIndex - 1 }
+          : r
+      );
+    safeWriteJson(STORAGE_KEYS.PLANNING_MANUAL_ROWS, nextRows);
+    safeWriteJson(STORAGE_KEYS.PLANNING_DAY_ROW_COUNTS, {
+      ...counts,
+      [dateYmd]: Math.max(10, currentCount - 1),
+    });
+    void weekStartYmd;
+    return {};
+  },
+
+  // --- Projets, Affectations & Formulaires personnalisables ---
+  _normalizeFormFields(fields: ProjectFormField[], preserveIds = false): ProjectFormField[] {
+    const sorted = [...fields].sort((a, b) => a.order - b.order);
+    return sorted.map((f, idx) => {
+      const needsOptions = f.type === 'select' || f.type === 'checkbox' || f.type === 'radio';
+      const cleanedOptions = needsOptions
+        ? Array.from(
+            new Set(
+              (f.options ?? [])
+                .map((opt) => opt.trim())
+                .filter(Boolean)
+            )
+          )
+        : undefined;
+      return {
+        id: preserveIds && f.id ? f.id : f.id || generateUniqueId('fld'),
+        label: f.label.trim(),
+        type: f.type,
+        required: Boolean(f.required),
+        options: cleanedOptions,
+        order: idx + 1,
+        active: f.active !== false,
+      };
+    });
+  },
+
+  _cloneFormFields(fields: ProjectFormField[], regenerateIds = false): ProjectFormField[] {
+    return fields.map((f, idx) => ({
+      id: regenerateIds ? generateUniqueId('fld') : f.id,
+      label: f.label,
+      type: f.type,
+      required: Boolean(f.required),
+      options: f.options ? [...f.options] : undefined,
+      order: idx + 1,
+      active: f.active !== false,
+    }));
+  },
+
+  _validateFormFields(fields: ProjectFormField[]): string | null {
+    for (let i = 0; i < fields.length; i++) {
+      const f = fields[i];
+      if (!f.label.trim()) {
+        return `Le champ n°${i + 1} doit avoir un nom.`;
+      }
+      if (f.type === 'select' || f.type === 'radio') {
+        const opts = (f.options ?? []).map((o) => o.trim()).filter(Boolean);
+        if (opts.length === 0) {
+          return `Le champ « ${f.label} » doit contenir au moins une option.`;
+        }
+      }
+    }
+    return null;
+  },
+
+  canUserManageProjects(actorOrId: AppUser | string): boolean {
+    const actorId = typeof actorOrId === 'string' ? actorOrId : actorOrId.id;
+    const account = this.getUsers().find((u) => u.id === actorId);
+    if (!account || account.accountStatus !== 'actif') return false;
+    return account.role === 'admin' || account.role === 'manager';
+  },
+
+  getFormTemplates(): FormTemplate[] {
+    const existing = safeReadJson<FormTemplate[]>(STORAGE_KEYS.FORM_TEMPLATES);
+    if (existing && Array.isArray(existing)) return existing;
+    safeWriteJson(STORAGE_KEYS.FORM_TEMPLATES, INITIAL_FORM_TEMPLATES);
+    return INITIAL_FORM_TEMPLATES;
+  },
+
+  createFormTemplate(
+    input: { name: string; description?: string; fields: ProjectFormField[] },
+    actor: AppUser
+  ): { templates: FormTemplate[]; created?: FormTemplate; error?: string } {
+    const current = this.getFormTemplates();
+    if (!this.canUserManageProjects(actor)) {
+      return {
+        templates: current,
+        error: 'Seuls l’administrateur et les managers peuvent créer des modèles de formulaire.',
+      };
+    }
+    const cleanName = input.name.trim();
+    if (!cleanName) {
+      return { templates: current, error: 'Le nom du modèle est obligatoire.' };
+    }
+    if (current.some((t) => t.name.trim().toLowerCase() === cleanName.toLowerCase())) {
+      return { templates: current, error: 'Un modèle portant ce nom existe déjà.' };
+    }
+    const normalizedFields = this._normalizeFormFields(input.fields, false);
+    const fieldErr = this._validateFormFields(normalizedFields);
+    if (fieldErr) {
+      return { templates: current, error: fieldErr };
+    }
+
+    const nowIso = clockService.nowIso();
+    const created: FormTemplate = {
+      id: generateUniqueId('tpl'),
+      name: cleanName,
+      description: input.description?.trim() ?? '',
+      isPredefined: false,
+      fields: normalizedFields,
+      createdAt: nowIso,
+      updatedAt: nowIso,
+      createdByName: actor.fullName,
+    };
+    const next = [created, ...current];
+    safeWriteJson(STORAGE_KEYS.FORM_TEMPLATES, next);
+    this.appendAuditLog(actor, 'Modèle de formulaire créé', '—', cleanName);
+    return { templates: next, created };
+  },
+
+  updateFormTemplate(
+    templateId: string,
+    input: { name: string; description?: string; fields: ProjectFormField[] },
+    actor: AppUser
+  ): { templates: FormTemplate[]; updated?: FormTemplate; error?: string } {
+    const current = this.getFormTemplates();
+    if (!this.canUserManageProjects(actor)) {
+      return {
+        templates: current,
+        error: 'Seuls l’administrateur et les managers peuvent modifier les modèles.',
+      };
+    }
+    const existing = current.find((t) => t.id === templateId);
+    if (!existing) {
+      return { templates: current, error: 'Modèle introuvable.' };
+    }
+    const cleanName = input.name.trim();
+    if (!cleanName) {
+      return { templates: current, error: 'Le nom du modèle est obligatoire.' };
+    }
+    if (
+      current.some(
+        (t) => t.id !== templateId && t.name.trim().toLowerCase() === cleanName.toLowerCase()
+      )
+    ) {
+      return { templates: current, error: 'Un autre modèle porte déjà ce nom.' };
+    }
+    const normalizedFields = this._normalizeFormFields(input.fields, true);
+    const fieldErr = this._validateFormFields(normalizedFields);
+    if (fieldErr) {
+      return { templates: current, error: fieldErr };
+    }
+
+    const nowIso = clockService.nowIso();
+    const updated: FormTemplate = {
+      ...existing,
+      name: cleanName,
+      description: input.description?.trim() ?? '',
+      fields: normalizedFields,
+      updatedAt: nowIso,
+    };
+    const next = current.map((t) => (t.id === templateId ? updated : t));
+    safeWriteJson(STORAGE_KEYS.FORM_TEMPLATES, next);
+    this.appendAuditLog(actor, `Modèle mis à jour · ${cleanName}`, existing.name, cleanName);
+    return { templates: next, updated };
+  },
+
+  getProjects(): ProjectRecord[] {
+    const existing = safeReadJson<ProjectRecord[]>(STORAGE_KEYS.PROJECTS);
+    if (existing && Array.isArray(existing)) return existing;
+    safeWriteJson(STORAGE_KEYS.PROJECTS, []);
+    return [];
+  },
+
+  isEmployeeAssignedToProject(
+    employee: { id: string; teamId?: string },
+    project: ProjectRecord
+  ): boolean {
+    if (project.addedEmployeeIds.includes(employee.id)) return true;
+    if (
+      employee.teamId &&
+      project.assignedTeamIds.includes(employee.teamId) &&
+      !project.excludedEmployeeIds.includes(employee.id)
+    ) {
+      return true;
+    }
+    return false;
+  },
+
+  getProjectsForUser(actor: AppUser): ProjectRecord[] {
+    const accounts = this.getUsers();
+    const actorAccount = accounts.find((u) => u.id === actor.id);
+    if (!actorAccount || actorAccount.accountStatus !== 'actif') return [];
+
+    const all = this.getProjects();
+    if (actorAccount.role === 'admin' || actorAccount.role === 'manager') {
+      return all;
+    }
+
+    if (actorAccount.role === 'supervisor') {
+      const teams = this.getTeams();
+      const supTeamIds = Array.from(
+        new Set(
+          [
+            actorAccount.teamId,
+            ...teams.filter((t) => t.supervisorId === actorAccount.id).map((t) => t.id),
+          ].filter(Boolean)
+        )
+      );
+      const scopedEmployees = accounts.filter(
+        (emp) =>
+          emp.role === 'employee' &&
+          (supTeamIds.includes(emp.teamId) || emp.supervisorId === actorAccount.id)
+      );
+      return all.filter(
+        (p) =>
+          p.assignedTeamIds.some((tid) => supTeamIds.includes(tid)) ||
+          scopedEmployees.some((emp) => this.isEmployeeAssignedToProject(emp, p)) ||
+          this.isEmployeeAssignedToProject(actorAccount, p)
+      );
+    }
+
+    // Employé : uniquement ses projets actifs affectés
+    return all.filter((p) => p.active && this.isEmployeeAssignedToProject(actorAccount, p));
+  },
+
+  getAssignableProjectsForActor(actor: AppUser): ProjectRecord[] {
+    if (!this.canUserManageProjects(actor)) return [];
+    return this.getProjectsForUser(actor).filter((p) => p.active);
+  },
+
+  _validateRequestedProjectIds(assignedProjectIds: string[], actor: AppUser): string | null {
+    if (!this.canUserManageProjects(actor)) {
+      return 'Seuls l’administrateur et les managers peuvent modifier les affectations aux projets.';
+    }
+    const assignableIds = new Set(this.getAssignableProjectsForActor(actor).map((p) => p.id));
+    for (const pid of assignedProjectIds) {
+      if (!assignableIds.has(pid)) {
+        return 'Un ou plusieurs projets sélectionnés sont désactivés ou ne relèvent pas de votre périmètre.';
+      }
+    }
+    return null;
+  },
+
+  _syncUserProjectAssignments(
+    targetUser: ManagedEmployee,
+    desiredProjectIds: string[],
+    actor: AppUser
+  ): ProjectRecord[] {
+    const allProjects = this.getProjects();
+    if (allProjects.length === 0) return allProjects;
+
+    const assignableIds = new Set(this.getAssignableProjectsForActor(actor).map((p) => p.id));
+    const desiredSet = new Set(desiredProjectIds);
+    const nowIso = clockService.nowIso();
+    let changedCount = 0;
+
+    const nextProjects = allProjects.map((proj) => {
+      if (!proj.active || !assignableIds.has(proj.id)) return proj;
+
+      const inAssignedTeam = Boolean(
+        targetUser.teamId && proj.assignedTeamIds.includes(targetUser.teamId)
+      );
+      const wantAssigned = desiredSet.has(proj.id);
+
+      let nextAdded = proj.addedEmployeeIds;
+      let nextExcluded = proj.excludedEmployeeIds;
+
+      if (wantAssigned) {
+        nextExcluded = proj.excludedEmployeeIds.filter((id) => id !== targetUser.id);
+        if (!inAssignedTeam && !proj.addedEmployeeIds.includes(targetUser.id)) {
+          nextAdded = [...proj.addedEmployeeIds, targetUser.id];
+        }
+      } else {
+        nextAdded = proj.addedEmployeeIds.filter((id) => id !== targetUser.id);
+        if (inAssignedTeam) {
+          if (!proj.excludedEmployeeIds.includes(targetUser.id)) {
+            nextExcluded = [...proj.excludedEmployeeIds, targetUser.id];
+          }
+        } else {
+          nextExcluded = proj.excludedEmployeeIds.filter((id) => id !== targetUser.id);
+        }
+      }
+
+      const addedChanged =
+        nextAdded.length !== proj.addedEmployeeIds.length ||
+        nextAdded.some((id, idx) => id !== proj.addedEmployeeIds[idx]);
+      const excludedChanged =
+        nextExcluded.length !== proj.excludedEmployeeIds.length ||
+        nextExcluded.some((id, idx) => id !== proj.excludedEmployeeIds[idx]);
+
+      if (!addedChanged && !excludedChanged) return proj;
+
+      changedCount += 1;
+      return {
+        ...proj,
+        addedEmployeeIds: nextAdded,
+        excludedEmployeeIds: nextExcluded,
+        updatedAt: nowIso,
+      };
+    });
+
+    if (changedCount > 0) {
+      safeWriteJson(STORAGE_KEYS.PROJECTS, nextProjects);
+      const idLabel = targetUser.matricule || targetUser.username || targetUser.id;
+      const assignedNames = nextProjects
+        .filter((p) => p.active && this.isEmployeeAssignedToProject(targetUser, p))
+        .map((p) => p.name);
+      this.appendAuditLog(
+        actor,
+        `Affectations projets · ${targetUser.fullName} (${idLabel})`,
+        `${changedCount} projet(s) mis à jour`,
+        assignedNames.length > 0 ? assignedNames.join(', ') : 'Aucun projet actif'
+      );
+    }
+
+    return nextProjects;
+  },
+
+  getLatestPublishedFormVersion(project: ProjectRecord): ProjectFormVersion | null {
+    if (!project.formVersions || project.formVersions.length === 0) return null;
+    return (
+      project.formVersions.find((v) => v.id === project.currentFormVersionId) ??
+      project.formVersions[project.formVersions.length - 1]
+    );
+  },
+
+  createProject(
+    input: {
+      name: string;
+      code?: string;
+      description?: string;
+      templateId?: string;
+      fields?: ProjectFormField[];
+      assignedTeamIds?: string[];
+      addedEmployeeIds?: string[];
+    },
+    actor: AppUser
+  ): { projects: ProjectRecord[]; created?: ProjectRecord; error?: string } {
+    const current = this.getProjects();
+    if (!this.canUserManageProjects(actor)) {
+      return {
+        projects: current,
+        error: 'Seuls l’administrateur et les managers peuvent créer un projet.',
+      };
+    }
+
+    const cleanName = input.name.trim();
+    if (!cleanName) {
+      return { projects: current, error: 'Le nom du projet est obligatoire.' };
+    }
+    if (current.some((p) => p.name.trim().toLowerCase() === cleanName.toLowerCase())) {
+      return { projects: current, error: 'Un projet portant ce nom existe déjà.' };
+    }
+
+    const rawCode = (input.code ?? '').trim();
+    const autoCode =
+      rawCode ||
+      `PRJ-${String(current.length + 1).padStart(3, '0')}`;
+    if (current.some((p) => p.code.trim().toLowerCase() === autoCode.toLowerCase())) {
+      return { projects: current, error: 'Ce code projet est déjà utilisé.' };
+    }
+
+    let sourceTemplate: FormTemplate | undefined;
+    let initialFields: ProjectFormField[] = [];
+    if (input.fields && input.fields.length > 0) {
+      initialFields = this._normalizeFormFields(this._cloneFormFields(input.fields, true), true);
+    } else if (input.templateId) {
+      sourceTemplate = this.getFormTemplates().find((t) => t.id === input.templateId);
+      if (sourceTemplate) {
+        initialFields = this._cloneFormFields(sourceTemplate.fields, true);
+      }
+    }
+
+    const fieldErr = this._validateFormFields(initialFields);
+    if (fieldErr) {
+      return { projects: current, error: fieldErr };
+    }
+
+    const nowIso = clockService.nowIso();
+    const projectId = generateUniqueId('prj');
+    const v1Id = generateUniqueId('pfv');
+    const v1: ProjectFormVersion = {
+      id: v1Id,
+      projectId,
+      versionNumber: 1,
+      fields: initialFields,
+      sourceTemplateId: sourceTemplate?.id,
+      sourceTemplateName: sourceTemplate?.name,
+      publishedAt: nowIso,
+      publishedById: actor.id,
+      publishedByName: actor.fullName,
+      changeNote: sourceTemplate
+        ? `Création initiale depuis le modèle « ${sourceTemplate.name} »`
+        : 'Création initiale du formulaire',
+    };
+
+    const created: ProjectRecord = {
+      id: projectId,
+      name: cleanName,
+      code: autoCode,
+      description: input.description?.trim() ?? '',
+      active: true,
+      assignedTeamIds: Array.from(new Set(input.assignedTeamIds ?? [])),
+      addedEmployeeIds: Array.from(new Set(input.addedEmployeeIds ?? [])),
+      excludedEmployeeIds: [],
+      currentFormVersionId: v1Id,
+      currentFormVersionNumber: 1,
+      formVersions: [v1],
+      createdAt: nowIso,
+      createdByName: actor.fullName,
+      updatedAt: nowIso,
+    };
+
+    const next = [created, ...current];
+    safeWriteJson(STORAGE_KEYS.PROJECTS, next);
+    this.appendAuditLog(actor, 'Projet créé', '—', `${cleanName} (${autoCode})`);
+    return { projects: next, created };
+  },
+
+  updateProjectInfo(
+    projectId: string,
+    patch: { name: string; code: string; description: string },
+    actor: AppUser
+  ): { projects: ProjectRecord[]; updated?: ProjectRecord; error?: string } {
+    const current = this.getProjects();
+    if (!this.canUserManageProjects(actor)) {
+      return {
+        projects: current,
+        error: 'Seuls l’administrateur et les managers peuvent modifier un projet.',
+      };
+    }
+    const existing = current.find((p) => p.id === projectId);
+    if (!existing) {
+      return { projects: current, error: 'Projet introuvable.' };
+    }
+
+    const cleanName = patch.name.trim();
+    const cleanCode = patch.code.trim();
+    if (!cleanName) return { projects: current, error: 'Le nom du projet est obligatoire.' };
+    if (!cleanCode) return { projects: current, error: 'Le code projet est obligatoire.' };
+
+    if (
+      current.some(
+        (p) => p.id !== projectId && p.name.trim().toLowerCase() === cleanName.toLowerCase()
+      )
+    ) {
+      return { projects: current, error: 'Un autre projet porte déjà ce nom.' };
+    }
+    if (
+      current.some(
+        (p) => p.id !== projectId && p.code.trim().toLowerCase() === cleanCode.toLowerCase()
+      )
+    ) {
+      return { projects: current, error: 'Un autre projet utilise déjà ce code.' };
+    }
+
+    const updated: ProjectRecord = {
+      ...existing,
+      name: cleanName,
+      code: cleanCode,
+      description: patch.description.trim(),
+      updatedAt: clockService.nowIso(),
+    };
+    const next = current.map((p) => (p.id === projectId ? updated : p));
+    safeWriteJson(STORAGE_KEYS.PROJECTS, next);
+    this.appendAuditLog(
+      actor,
+      `Projet modifié · ${cleanCode}`,
+      existing.name,
+      cleanName
+    );
+    return { projects: next, updated };
+  },
+
+  toggleProjectActive(
+    projectId: string,
+    active: boolean,
+    actor: AppUser
+  ): { projects: ProjectRecord[]; error?: string } {
+    const current = this.getProjects();
+    if (!this.canUserManageProjects(actor)) {
+      return {
+        projects: current,
+        error: 'Seuls l’administrateur et les managers peuvent activer ou désactiver un projet.',
+      };
+    }
+    const existing = current.find((p) => p.id === projectId);
+    if (!existing) {
+      return { projects: current, error: 'Projet introuvable.' };
+    }
+    const next = current.map((p) =>
+      p.id === projectId
+        ? { ...p, active, updatedAt: clockService.nowIso() }
+        : p
+    );
+    safeWriteJson(STORAGE_KEYS.PROJECTS, next);
+    this.appendAuditLog(
+      actor,
+      `Statut projet · ${existing.name}`,
+      existing.active ? 'Actif' : 'Désactivé',
+      active ? 'Actif' : 'Désactivé'
+    );
+    return { projects: next };
+  },
+
+  updateProjectAssignments(
+    projectId: string,
+    payload: {
+      assignedTeamIds: string[];
+      addedEmployeeIds: string[];
+      excludedEmployeeIds: string[];
+    },
+    actor: AppUser
+  ): { projects: ProjectRecord[]; updated?: ProjectRecord; error?: string } {
+    const current = this.getProjects();
+    if (!this.canUserManageProjects(actor)) {
+      return {
+        projects: current,
+        error: 'Seuls l’administrateur et les managers peuvent gérer les affectations de projet.',
+      };
+    }
+    const existing = current.find((p) => p.id === projectId);
+    if (!existing) {
+      return { projects: current, error: 'Projet introuvable.' };
+    }
+
+    const accounts = this.getUsers();
+    const teamSet = new Set(payload.assignedTeamIds);
+    const addedSet = new Set(payload.addedEmployeeIds);
+    const excluded = payload.excludedEmployeeIds.filter((empId) => {
+      if (addedSet.has(empId)) return false;
+      const emp = accounts.find((u) => u.id === empId);
+      return Boolean(emp && emp.teamId && teamSet.has(emp.teamId));
+    });
+
+    const updated: ProjectRecord = {
+      ...existing,
+      assignedTeamIds: Array.from(teamSet),
+      addedEmployeeIds: Array.from(addedSet),
+      excludedEmployeeIds: Array.from(new Set(excluded)),
+      updatedAt: clockService.nowIso(),
+    };
+    const next = current.map((p) => (p.id === projectId ? updated : p));
+    safeWriteJson(STORAGE_KEYS.PROJECTS, next);
+    this.appendAuditLog(
+      actor,
+      `Affectations projet · ${existing.name}`,
+      `${existing.assignedTeamIds.length} éq. / +${existing.addedEmployeeIds.length} emp.`,
+      `${updated.assignedTeamIds.length} éq. / +${updated.addedEmployeeIds.length} emp.`
+    );
+    return { projects: next, updated };
+  },
+
+  toggleEmployeeAssignmentOnProject(
+    projectId: string,
+    employeeId: string,
+    assigned: boolean,
+    actor: AppUser
+  ): { projects: ProjectRecord[]; updated?: ProjectRecord; error?: string } {
+    const current = this.getProjects();
+    if (!this.canUserManageProjects(actor)) {
+      return {
+        projects: current,
+        error: 'Seuls l’administrateur et les managers peuvent modifier les affectations.',
+      };
+    }
+    const existing = current.find((p) => p.id === projectId);
+    if (!existing) return { projects: current, error: 'Projet introuvable.' };
+    const emp = this.getUsers().find((u) => u.id === employeeId);
+    if (!emp) return { projects: current, error: 'Employé introuvable.' };
+
+    const inAssignedTeam = Boolean(emp.teamId && existing.assignedTeamIds.includes(emp.teamId));
+    let nextAdded = [...existing.addedEmployeeIds];
+    let nextExcluded = [...existing.excludedEmployeeIds];
+
+    if (assigned) {
+      nextExcluded = nextExcluded.filter((id) => id !== employeeId);
+      if (!inAssignedTeam && !nextAdded.includes(employeeId)) {
+        nextAdded.push(employeeId);
+      }
+    } else {
+      nextAdded = nextAdded.filter((id) => id !== employeeId);
+      if (inAssignedTeam && !nextExcluded.includes(employeeId)) {
+        nextExcluded.push(employeeId);
+      }
+    }
+
+    return this.updateProjectAssignments(
+      projectId,
+      {
+        assignedTeamIds: existing.assignedTeamIds,
+        addedEmployeeIds: nextAdded,
+        excludedEmployeeIds: nextExcluded,
+      },
+      actor
+    );
+  },
+
+  publishProjectFormVersion(
+    projectId: string,
+    fields: ProjectFormField[],
+    options: { sourceTemplateId?: string; sourceTemplateName?: string; changeNote?: string },
+    actor: AppUser
+  ): { projects: ProjectRecord[]; version?: ProjectFormVersion; error?: string } {
+    const current = this.getProjects();
+    if (!this.canUserManageProjects(actor)) {
+      return {
+        projects: current,
+        error: 'Seuls l’administrateur et les managers peuvent publier une version de formulaire.',
+      };
+    }
+    const existing = current.find((p) => p.id === projectId);
+    if (!existing) {
+      return { projects: current, error: 'Projet introuvable.' };
+    }
+
+    const clonedNormalized = this._normalizeFormFields(
+      this._cloneFormFields(fields, true),
+      true
+    );
+    const fieldErr = this._validateFormFields(clonedNormalized);
+    if (fieldErr) {
+      return { projects: current, error: fieldErr };
+    }
+
+    const nextVersionNumber =
+      existing.formVersions.reduce((max, v) => Math.max(max, v.versionNumber), 0) + 1;
+    const nowIso = clockService.nowIso();
+    const version: ProjectFormVersion = {
+      id: generateUniqueId('pfv'),
+      projectId,
+      versionNumber: nextVersionNumber,
+      fields: clonedNormalized,
+      sourceTemplateId: options.sourceTemplateId,
+      sourceTemplateName: options.sourceTemplateName,
+      publishedAt: nowIso,
+      publishedById: actor.id,
+      publishedByName: actor.fullName,
+      changeNote: options.changeNote?.trim() || undefined,
+    };
+
+    const updated: ProjectRecord = {
+      ...existing,
+      currentFormVersionId: version.id,
+      currentFormVersionNumber: nextVersionNumber,
+      formVersions: [...existing.formVersions, version],
+      updatedAt: nowIso,
+    };
+
+    const next = current.map((p) => (p.id === projectId ? updated : p));
+    safeWriteJson(STORAGE_KEYS.PROJECTS, next);
+    this.appendAuditLog(
+      actor,
+      `Formulaire publié · ${existing.name}`,
+      `v${existing.currentFormVersionNumber}`,
+      `v${nextVersionNumber}`,
+      options.changeNote
+    );
+
+    return { projects: next, version };
+  },
+
+  getAllTreatmentActivities(): Array<
+    ActivityRecord & { employeeName: string; teamId: string; matricule: string }
+  > {
+    const accounts = this.getUsers();
+    const result: Array<
+      ActivityRecord & { employeeName: string; teamId: string; matricule: string }
+    > = [];
+    for (const acc of accounts) {
+      const acts = this.getActivitiesForUser(acc.id);
+      for (const act of acts) {
+        if (act.type === 'traitement') {
+          result.push({
+            ...act,
+            employeeName: acc.fullName,
+            teamId: acc.teamId ?? '',
+            matricule: acc.matricule ?? '',
+          });
+        }
+      }
+    }
+    return result.sort((a, b) => b.endedAt.localeCompare(a.endedAt));
   },
 
   // --- Chronomètres & État de service employé ---
@@ -2723,12 +3405,64 @@ export const storageService = {
     return updated;
   },
 
-  startTreatmentSession(userId: string): { shiftState: EmployeeShiftState; error?: string } {
+  startTreatmentSession(
+    userId: string,
+    projectId?: string
+  ): { shiftState: EmployeeShiftState; error?: string } {
     const current = this.getShiftState(userId);
     if (current.activeTimer) {
       return {
         shiftState: current,
         error: 'Un chronomètre est déjà actif. Terminez-le avant d’en démarrer un autre.',
+      };
+    }
+
+    const empAccount = this.getUsers().find((u) => u.id === userId);
+    const allProjects = this.getProjects();
+    const authorizedActiveProjects = empAccount
+      ? allProjects.filter((p) => p.active && this.isEmployeeAssignedToProject(empAccount, p))
+      : [];
+
+    if (!projectId) {
+      if (authorizedActiveProjects.length === 0) {
+        return {
+          shiftState: current,
+          error:
+            'Aucun projet actif ne vous est affecté. Contactez votre manager ou superviseur.',
+        };
+      }
+      return {
+        shiftState: current,
+        error: 'Veuillez sélectionner un projet avant de démarrer un traitement.',
+      };
+    }
+
+    const candidate = allProjects.find((p) => p.id === projectId);
+    if (
+      !candidate ||
+      !candidate.active ||
+      !empAccount ||
+      !this.isEmployeeAssignedToProject(empAccount, candidate)
+    ) {
+      return {
+        shiftState: current,
+        error: 'Ce projet est désactivé ou ne fait pas partie de vos affectations.',
+      };
+    }
+
+    const formVersion = this.getLatestPublishedFormVersion(candidate);
+    const activeFields = formVersion
+      ? this._cloneFormFields(
+          formVersion.fields.filter((f) => f.active).sort((a, b) => a.order - b.order),
+          false
+        )
+      : [];
+
+    if (!formVersion || activeFields.length === 0) {
+      return {
+        shiftState: current,
+        error:
+          'Ce projet ne possède pas de formulaire publié actif. Contactez votre manager ou administrateur.',
       };
     }
 
@@ -2740,14 +3474,16 @@ export const storageService = {
       id: generateUniqueId('act'),
       type: 'traitement',
       startedAt: nowIso,
+      projectId: candidate.id,
+      projectName: candidate.name,
+      formVersionId: formVersion.id,
+      formVersionNumber: formVersion.versionNumber,
+      formFieldsSnapshot: activeFields,
+      customResponses: {},
       taskId: '',
       taskTitle: '',
       companyId: '',
       clientName: '',
-      receptionChannel: 'Mail',
-      receptionDateTime: toLocalDateTimeInputValue(new Date(nowMs)),
-      recipientEmail: '',
-      teamsRequesterName: '',
       dossierRef: '',
       notes: '',
     };
@@ -2890,16 +3626,25 @@ export const storageService = {
         | 'recipientEmail'
         | 'teamsRequesterName'
         | 'customReason'
+        | 'customResponses'
       >
     >
   ): EmployeeShiftState {
     const current = this.getShiftState(userId);
     if (!current.activeTimer) return current;
+    const mergedResponses =
+      patch.customResponses !== undefined
+        ? {
+            ...(current.activeTimer.customResponses ?? {}),
+            ...patch.customResponses,
+          }
+        : current.activeTimer.customResponses;
     const updated: EmployeeShiftState = {
       ...current,
       activeTimer: {
         ...current.activeTimer,
         ...patch,
+        customResponses: mergedResponses,
       },
     };
     this.saveShiftState(updated);
@@ -2923,14 +3668,54 @@ export const storageService = {
     const errors: string[] = [];
 
     if (active.type === 'traitement') {
-      if (!active.clientName.trim()) errors.push('La société cliente est obligatoire.');
-      if (!active.taskTitle.trim()) errors.push('Le type de tâche est obligatoire.');
-      if (!active.receptionChannel) errors.push('Le canal de réception est obligatoire.');
-      if (!active.receptionDateTime?.trim()) {
-        errors.push('La date et heure de réception sont obligatoires.');
-      }
-      if (!active.dossierRef?.trim()) {
-        errors.push('La référence du dossier est obligatoire.');
+      const orderedFields = (active.formFieldsSnapshot ?? [])
+        .filter((f) => f.active)
+        .slice()
+        .sort((a, b) => a.order - b.order);
+
+      if (orderedFields.length === 0) {
+        errors.push('Aucun formulaire publié actif n’est associé à ce traitement.');
+      } else {
+        const responses = active.customResponses ?? {};
+        for (const field of orderedFields) {
+          const rawVal = responses[field.id];
+          if (field.type === 'checkbox') {
+            const arr = Array.isArray(rawVal)
+              ? rawVal.map((v) => String(v).trim()).filter(Boolean)
+              : [];
+            if (field.required && arr.length === 0) {
+              errors.push(`Le champ « ${field.label} » est obligatoire.`);
+            }
+            if ((field.options ?? []).length > 0 && arr.some((v) => !(field.options ?? []).includes(v))) {
+              errors.push(`Le champ « ${field.label} » contient une option invalide.`);
+            }
+          } else {
+            const strVal = typeof rawVal === 'string' ? rawVal.trim() : '';
+            if (field.required && !strVal) {
+              errors.push(`Le champ « ${field.label} » est obligatoire.`);
+            } else if (strVal) {
+              if (field.type === 'number' && Number.isNaN(Number(strVal))) {
+                errors.push(`Le champ « ${field.label} » doit contenir un nombre valide.`);
+              }
+              if (field.type === 'email' && !isValidEmail(strVal)) {
+                errors.push(`Le champ « ${field.label} » doit contenir une adresse e-mail valide.`);
+              }
+              if (field.type === 'date' && !isValidYmd(strVal)) {
+                errors.push(`Le champ « ${field.label} » doit contenir une date valide.`);
+              }
+              if (field.type === 'time' && !isValidHHmm(strVal)) {
+                errors.push(`Le champ « ${field.label} » doit contenir une heure valide (HH:MM).`);
+              }
+              if (
+                (field.type === 'select' || field.type === 'radio') &&
+                (field.options ?? []).length > 0 &&
+                !(field.options ?? []).includes(strVal)
+              ) {
+                errors.push(`Le champ « ${field.label} » contient une option invalide.`);
+              }
+            }
+          }
+        }
       }
     }
 
@@ -2959,34 +3744,67 @@ export const storageService = {
       overtimeSeconds = realDurationSeconds > limitSec ? realDurationSeconds - limitSec : 0;
     }
 
-    const finalTaskTitle =
-      active.type === 'sortie' && active.outingReason === 'autre' && active.customReason?.trim()
-        ? `Autre : ${active.customReason.trim()}`
-        : active.taskTitle.trim();
+    const isDynamicTreatment = active.type === 'traitement';
+
+    const finalTaskTitle = isDynamicTreatment
+      ? ''
+      : active.type === 'sortie' && active.outingReason === 'autre' && active.customReason?.trim()
+      ? `Autre : ${active.customReason.trim()}`
+      : active.taskTitle.trim();
+
+    const allowedFieldIds = new Set(
+      (active.formFieldsSnapshot ?? []).filter((f) => f.active).map((f) => f.id)
+    );
+    const cleanedResponses: Record<string, CustomFieldValue> | undefined =
+      active.formFieldsSnapshot && active.formFieldsSnapshot.length > 0
+        ? Object.fromEntries(
+            Object.entries(active.customResponses ?? {})
+              .filter(([k]) => allowedFieldIds.has(k))
+              .map(([k, v]) => [
+                k,
+                Array.isArray(v)
+                  ? v.map((item) => String(item).trim()).filter(Boolean)
+                  : String(v ?? '').trim(),
+              ])
+          )
+        : undefined;
 
     const record: ActivityRecord = {
       id: active.id || generateUniqueId('act'),
       userId,
       type: active.type,
-      taskId: active.taskId,
+      projectId: active.projectId,
+      projectName: active.projectName,
+      formVersionId: active.formVersionId,
+      formVersionNumber: active.formVersionNumber,
+      formFieldsSnapshot: active.formFieldsSnapshot
+        ? this._cloneFormFields(active.formFieldsSnapshot, false)
+        : undefined,
+      customResponses: cleanedResponses,
+      taskId: isDynamicTreatment ? '' : active.taskId,
       taskTitle: finalTaskTitle,
-      companyId: active.companyId,
-      clientName: active.clientName.trim() || 'Interne',
-      dossierRef:
-        active.dossierRef?.trim() ||
-        (active.type === 'pause'
-          ? (active.pauseSlot ?? 'PAUSE').toUpperCase()
-          : `SORTIE-${String(endedAtMs).slice(-5)}`),
+      companyId: isDynamicTreatment ? '' : active.companyId,
+      clientName: isDynamicTreatment ? '' : active.clientName.trim() || 'Interne',
+      dossierRef: isDynamicTreatment
+        ? ''
+        : active.dossierRef?.trim() ||
+          (active.type === 'pause'
+            ? (active.pauseSlot ?? 'PAUSE').toUpperCase()
+            : `SORTIE-${String(endedAtMs).slice(-5)}`),
       startedAt: active.startedAt,
       endedAt: endedAtIso,
       durationSeconds: realDurationSeconds,
       status: active.type === 'traitement' ? 'en_controle' : 'termine',
       syncStatus: 'local_en_attente',
-      notes: active.notes.trim() || undefined,
-      receptionChannel: active.receptionChannel as ReceptionChannel | undefined,
-      receptionDateTime: active.receptionDateTime,
-      recipientEmail: active.recipientEmail?.trim() || undefined,
-      teamsRequesterName: active.teamsRequesterName?.trim() || undefined,
+      notes: isDynamicTreatment ? undefined : active.notes.trim() || undefined,
+      receptionChannel: isDynamicTreatment
+        ? undefined
+        : (active.receptionChannel as ReceptionChannel | undefined),
+      receptionDateTime: isDynamicTreatment ? undefined : active.receptionDateTime,
+      recipientEmail: isDynamicTreatment ? undefined : active.recipientEmail?.trim() || undefined,
+      teamsRequesterName: isDynamicTreatment
+        ? undefined
+        : active.teamsRequesterName?.trim() || undefined,
       pauseSlot: active.pauseSlot,
       allowedDurationMinutes: active.allowedDurationMinutes,
       overtimeSeconds,
@@ -3014,6 +3832,14 @@ export const storageService = {
         companyName: record.clientName,
         taskId: record.taskId ?? '',
         taskName: record.taskTitle,
+        projectId: record.projectId,
+        projectName: record.projectName,
+        formVersionId: record.formVersionId,
+        formVersionNumber: record.formVersionNumber,
+        formFieldsSnapshot: record.formFieldsSnapshot
+          ? this._cloneFormFields(record.formFieldsSnapshot, false)
+          : undefined,
+        customResponses: record.customResponses,
         treatedAt: record.endedAt,
         durationSeconds: record.durationSeconds,
         receptionChannel: record.receptionChannel,

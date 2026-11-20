@@ -1,11 +1,30 @@
 import React from 'react';
-import { CalendarDays } from 'lucide-react';
-import { MyValidatedLeaveItem } from '../../core/types';
+import { CalendarDays, CheckCircle2, Clock, XCircle } from 'lucide-react';
+import { LeaveStatus, MyLeaveItem } from '../../core/types';
+import { LEAVE_STATUS_LABELS } from '../../core/permissions';
 import { formatYmdFr, formatYmdLongFr } from '../../utils/formatters';
 
 interface MyLeavesSectionProps {
-  leaves: MyValidatedLeaveItem[];
+  leaves: MyLeaveItem[];
 }
+
+const STATUS_DISPLAY: Record<
+  LeaveStatus,
+  { colorClass: string; Icon: React.ComponentType<{ className?: string }> }
+> = {
+  en_attente: {
+    colorClass: 'text-amber-700 dark:text-amber-400',
+    Icon: Clock,
+  },
+  valide: {
+    colorClass: 'text-emerald-700 dark:text-emerald-400',
+    Icon: CheckCircle2,
+  },
+  refuse: {
+    colorClass: 'text-red-700 dark:text-red-400',
+    Icon: XCircle,
+  },
+};
 
 export function MyLeavesSection({ leaves }: MyLeavesSectionProps) {
   return (
@@ -19,13 +38,13 @@ export function MyLeavesSection({ leaves }: MyLeavesSectionProps) {
           <h2 className="text-base font-semibold text-slate-900 dark:text-white">Mes congés</h2>
         </div>
         <span className="text-xs font-mono tabular-nums text-slate-500 dark:text-[#C8C2D0]">
-          {leaves.length} validé{leaves.length > 1 ? 's' : ''}
+          {leaves.length} demande{leaves.length > 1 ? 's' : ''}
         </span>
       </div>
 
       {leaves.length === 0 ? (
         <div className="px-5 py-5 text-xs text-slate-500 dark:text-[#C8C2D0]">
-          Aucun congé validé enregistré.
+          Aucun congé enregistré pour votre compte.
         </div>
       ) : (
         <div className="divide-y divide-slate-100 dark:divide-[#393342]">
@@ -34,7 +53,7 @@ export function MyLeavesSection({ leaves }: MyLeavesSectionProps) {
               leave.startDate === leave.endDate
                 ? formatYmdLongFr(leave.startDate)
                 : `Du ${formatYmdFr(leave.startDate)} au ${formatYmdFr(leave.endDate)}`;
-            const motifText = leave.motifs.length > 0 ? leave.motifs.join(' / ') : '';
+            const { colorClass, Icon } = STATUS_DISPLAY[leave.status] ?? STATUS_DISPLAY.en_attente;
 
             return (
               <div
@@ -45,14 +64,24 @@ export function MyLeavesSection({ leaves }: MyLeavesSectionProps) {
                   <div className="font-semibold text-slate-900 dark:text-white capitalize">
                     {periodLabel}
                   </div>
-                  {motifText && (
+                  {leave.motif && (
                     <div className="text-slate-600 dark:text-[#C8C2D0] truncate">
-                      Motif : <span className="font-medium text-slate-800 dark:text-white">{motifText}</span>
+                      Motif :{' '}
+                      <span className="font-medium text-slate-800 dark:text-white">
+                        {leave.motif}
+                      </span>
                     </div>
                   )}
                 </div>
-                <div className="font-mono tabular-nums font-semibold text-[#7624A8] dark:text-[#D896FF] whitespace-nowrap shrink-0">
-                  {leave.startTime} – {leave.endTime}
+
+                <div className="flex items-center gap-4 shrink-0">
+                  <span className="font-mono tabular-nums font-semibold text-[#7624A8] dark:text-[#D896FF] whitespace-nowrap">
+                    {leave.startTime} – {leave.endTime}
+                  </span>
+                  <span className={`inline-flex items-center gap-1.5 font-semibold whitespace-nowrap ${colorClass}`}>
+                    <Icon className="w-3.5 h-3.5 shrink-0" aria-hidden="true" />
+                    <span>{LEAVE_STATUS_LABELS[leave.status]}</span>
+                  </span>
                 </div>
               </div>
             );
