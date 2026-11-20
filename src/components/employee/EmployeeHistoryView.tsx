@@ -5,6 +5,7 @@ import {
   ActivityType,
   AppUser,
   CorrectionRequest,
+  ProjectRecord,
 } from '../../core/types';
 import {
   formatDateFr,
@@ -22,6 +23,7 @@ interface EmployeeHistoryViewProps {
   user: AppUser;
   activities: ActivityRecord[];
   correctionRequests: CorrectionRequest[];
+  projects?: ProjectRecord[];
   onCreateCorrectionRequest: (activity: ActivityRecord, reason: string) => void;
 }
 
@@ -29,10 +31,14 @@ export function EmployeeHistoryView({
   user,
   activities,
   correctionRequests,
+  projects = [],
   onCreateCorrectionRequest,
 }: EmployeeHistoryViewProps) {
   const [period, setPeriod] = useState<'jour' | 'semaine' | 'mois'>('jour');
   const [typeFilter, setTypeFilter] = useState<'all' | ActivityType>('all');
+  const [projectFilter, setProjectFilter] = useState<string>('all');
+  const [companyFilter, setCompanyFilter] = useState<string>('all');
+  const [taskFilter, setTaskFilter] = useState<string>('all');
   const [selectedActivity, setSelectedActivity] = useState<ActivityRecord | null>(null);
   const [detailActivity, setDetailActivity] = useState<ActivityRecord | null>(null);
   const [reason, setReason] = useState('');
@@ -41,14 +47,115 @@ export function EmployeeHistoryView({
   const now = useMemo(() => new Date(), []);
   const todayYmd = toYmd(now);
 
+  const projectOptions = useMemo(() => {
+    const map = new Map<string, { id: string; name: string; active: boolean }>();
+    for (const p of projects) {
+      map.set(p.id, { id: p.id, name: p.name, active: p.active });
+    }
+    for (const act of activities) {
+      if (act.type === 'traitement' && act.projectId && !map.has(act.projectId)) {
+        map.set(act.projectId, {
+          id: act.projectId,
+          name: act.projectName ?? act.projectId,
+          active: false,
+        });
+      }
+    }
+    return Array.from(map.values());
+  }, [projects, activities]);
+
+  const companyOptions = useMemo(() => {
+    const map = new Map<string, { id: string; label: string }>();
+    const scopedProjects =
+      projectFilter !== 'all' && projectFilter !== 'none'
+        ? projects.filter((p) => p.id === projectFilter)
+        : projectFilter === 'none'
+        ? []
+        : projects;
+    for (const p of scopedProjects) {
+      for (const c of p.companies ?? []) {
+        map.set(c.id, {
+          id: c.id,
+          label: projectFilter === 'all' ? `${c.name} (${p.name})` : c.name,
+        });
+      }
+    }
+    for (const act of activities) {
+      if (act.type !== 'traitement' || !act.companyId) continue;
+      if (projectFilter === 'none' && act.projectId) continue;
+      if (projectFilter !== 'all' && projectFilter !== 'none' && act.projectId !== projectFilter)
+        continue;
+      if (!map.has(act.companyId)) {
+        const baseName = act.clientName?.trim() || act.companyId;
+        map.set(act.companyId, {
+          id: act.companyId,
+          label:
+            projectFilter === 'all' && act.projectName
+              ? `${baseName} (${act.projectName})`
+              : baseName,
+        });
+      }
+    }
+    return Array.from(map.values());
+  }, [projects, activities, projectFilter]);
+
+  const taskOptions = useMemo(() => {
+    const map = new Map<string, { id: string; label: string }>();
+    const scopedProjects =
+      projectFilter !== 'all' && projectFilter !== 'none'
+        ? projects.filter((p) => p.id === projectFilter)
+        : projectFilter === 'none'
+        ? []
+        : projects;
+    for (const p of scopedProjects) {
+      for (const t of p.tasks ?? []) {
+        map.set(t.id, {
+          id: t.id,
+          label: projectFilter === 'all' ? `${t.name} (${p.name})` : t.name,
+        });
+      }
+    }
+    for (const act of activities) {
+      if (act.type !== 'traitement' || !act.taskId) continue;
+      if (projectFilter === 'none' && act.projectId) continue;
+      if (projectFilter !== 'all' && projectFilter !== 'none' && act.projectId !== projectFilter)
+        continue;
+      if (!map.has(act.taskId)) {
+        const baseName = act.taskTitle?.trim() || act.taskId;
+        map.set(act.taskId, {
+          id: act.taskId,
+          label:
+            projectFilter === 'all' && act.projectName
+              ? `${baseName} (${act.projectName})`
+              : baseName,
+        });
+      }
+    }
+    return Array.from(map.values());
+  }, [projects, activities, projectFilter]);
+
   const filteredOperations = useMemo(() => {
     return activities.filter((act) => {
       if (typeFilter !== 'all' && act.type !== typeFilter) return false;
+      if (projectFilter === 'none' && act.projectId) return false;
+      if (projectFilter !== 'all' && projectFilter !== 'none' && act.projectId !== projectFilter)
+        return false;
+      if (companyFilter !== 'all' && act.companyId !== companyFilter) return false;
+      if (taskFilter !== 'all' && act.taskId !== taskFilter) return false;
       if (period === 'jour') return isSameDayYmd(act.startedAt, todayYmd);
       if (period === 'semaine') return isWithinDays(act.startedAt, now, 7);
       return isSameMonth(act.startedAt, now.getFullYear(), now.getMonth());
     });
-  }, [activities, period, typeFilter, todayYmd, now]);
+  }, [
+    activities,
+    period,
+    typeFilter,
+    projectFilter,
+    companyFilter,
+    taskFilter,
+    todayYmd,
+    now,
+  ]);
 
   const dailySummaries = useMemo(() => {
     const byDay: Record<
@@ -153,53 +260,106 @@ export function EmployeeHistoryView({
         </span>
       </div>
 
-      <div className="bg-white dark:bg-[#292631] border border-slate-200 dark:border-[#393342] rounded-lg p-4 flex flex-col sm:flex-row sm:items-center sm:justify-between gap-3">
-        <div className="flex items-center gap-1 p-1 bg-slate-100 dark:bg-[#211E27] rounded-lg w-fit">
-          {(
-            [
-              { id: 'jour', label: 'Jour' },
-              { id: 'semaine', label: 'Semaine (7 j.)' },
-              { id: 'mois', label: 'Mois' },
-            ] as const
-          ).map((p) => (
-            <button
-              key={p.id}
-              type="button"
-              onClick={() => setPeriod(p.id)}
-              className={`px-3.5 py-1.5 text-xs font-semibold rounded-md transition-colors cursor-pointer whitespace-nowrap ${
-                period === p.id
-                  ? 'bg-[#A83CE2] text-white'
-                  : 'text-slate-600 dark:text-[#C8C2D0] hover:text-[#7624A8] dark:hover:text-white'
-              }`}
-            >
-              {p.label}
-            </button>
-          ))}
+      <div className="bg-white dark:bg-[#292631] border border-slate-200 dark:border-[#393342] rounded-lg p-4 space-y-3">
+        <div className="flex flex-col sm:flex-row sm:items-center sm:justify-between gap-3">
+          <div className="flex items-center gap-1 p-1 bg-slate-100 dark:bg-[#211E27] rounded-lg w-fit">
+            {(
+              [
+                { id: 'jour', label: 'Jour' },
+                { id: 'semaine', label: 'Semaine (7 j.)' },
+                { id: 'mois', label: 'Mois' },
+              ] as const
+            ).map((p) => (
+              <button
+                key={p.id}
+                type="button"
+                onClick={() => setPeriod(p.id)}
+                className={`px-3.5 py-1.5 text-xs font-semibold rounded-md transition-colors cursor-pointer whitespace-nowrap ${
+                  period === p.id
+                    ? 'bg-[#A83CE2] text-white'
+                    : 'text-slate-600 dark:text-[#C8C2D0] hover:text-[#7624A8] dark:hover:text-white'
+                }`}
+              >
+                {p.label}
+              </button>
+            ))}
+          </div>
+
+          <div className="flex items-center gap-1 p-1 bg-slate-100 dark:bg-[#211E27] rounded-lg w-fit">
+            {(
+              [
+                { id: 'all', label: 'Toutes' },
+                { id: 'traitement', label: 'Traitements' },
+                { id: 'pause', label: 'Pauses' },
+                { id: 'sortie', label: 'Sorties' },
+              ] as const
+            ).map((t) => (
+              <button
+                key={t.id}
+                type="button"
+                onClick={() => setTypeFilter(t.id)}
+                className={`px-3 py-1.5 text-xs font-medium rounded-md transition-colors cursor-pointer whitespace-nowrap ${
+                  typeFilter === t.id
+                    ? 'bg-white dark:bg-[#292631] text-[#7624A8] dark:text-[#D896FF] shadow-sm'
+                    : 'text-slate-600 dark:text-[#C8C2D0] hover:text-slate-900 dark:hover:text-white'
+                }`}
+              >
+                {t.label}
+              </button>
+            ))}
+          </div>
         </div>
 
-        <div className="flex items-center gap-1 p-1 bg-slate-100 dark:bg-[#211E27] rounded-lg w-fit">
-          {(
-            [
-              { id: 'all', label: 'Toutes' },
-              { id: 'traitement', label: 'Traitements' },
-              { id: 'pause', label: 'Pauses' },
-              { id: 'sortie', label: 'Sorties' },
-            ] as const
-          ).map((t) => (
-            <button
-              key={t.id}
-              type="button"
-              onClick={() => setTypeFilter(t.id)}
-              className={`px-3 py-1.5 text-xs font-medium rounded-md transition-colors cursor-pointer whitespace-nowrap ${
-                typeFilter === t.id
-                  ? 'bg-white dark:bg-[#292631] text-[#7624A8] dark:text-[#D896FF] shadow-sm'
-                  : 'text-slate-600 dark:text-[#C8C2D0] hover:text-slate-900 dark:hover:text-white'
-              }`}
+        {(projectOptions.length > 0 || companyOptions.length > 0 || taskOptions.length > 0) && (
+          <div className="grid grid-cols-1 sm:grid-cols-3 gap-3 pt-2 border-t border-slate-100 dark:border-[#393342]">
+            <select
+              aria-label="Filtrer par projet"
+              value={projectFilter}
+              onChange={(e) => {
+                setProjectFilter(e.target.value);
+                setCompanyFilter('all');
+                setTaskFilter('all');
+              }}
+              className="px-3 py-2 text-xs border border-slate-300 dark:border-[#393342] rounded-lg bg-white dark:bg-[#211E27] text-slate-900 dark:text-white focus:outline-none focus:border-[#A83CE2]"
             >
-              {t.label}
-            </button>
-          ))}
-        </div>
+              <option value="all">Tous les projets</option>
+              <option value="none">Sans projet (historique)</option>
+              {projectOptions.map((p) => (
+                <option key={p.id} value={p.id}>
+                  {p.name} {!p.active ? '(désactivé)' : ''}
+                </option>
+              ))}
+            </select>
+
+            <select
+              aria-label="Filtrer par société"
+              value={companyFilter}
+              onChange={(e) => setCompanyFilter(e.target.value)}
+              className="px-3 py-2 text-xs border border-slate-300 dark:border-[#393342] rounded-lg bg-white dark:bg-[#211E27] text-slate-900 dark:text-white focus:outline-none focus:border-[#A83CE2]"
+            >
+              <option value="all">Toutes les sociétés</option>
+              {companyOptions.map((c) => (
+                <option key={c.id} value={c.id}>
+                  {c.label}
+                </option>
+              ))}
+            </select>
+
+            <select
+              aria-label="Filtrer par tâche"
+              value={taskFilter}
+              onChange={(e) => setTaskFilter(e.target.value)}
+              className="px-3 py-2 text-xs border border-slate-300 dark:border-[#393342] rounded-lg bg-white dark:bg-[#211E27] text-slate-900 dark:text-white focus:outline-none focus:border-[#A83CE2]"
+            >
+              <option value="all">Toutes les tâches</option>
+              {taskOptions.map((t) => (
+                <option key={t.id} value={t.id}>
+                  {t.label}
+                </option>
+              ))}
+            </select>
+          </div>
+        )}
       </div>
 
       <div className="grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-4 gap-4">
@@ -579,6 +739,22 @@ export function EmployeeHistoryView({
               </button>
             </div>
             <div className="divide-y divide-slate-100 dark:divide-[#393342] text-xs">
+              {detailActivity.clientName && (
+                <div className="py-2.5 flex items-start justify-between gap-4">
+                  <span className="font-medium text-slate-600 dark:text-[#C8C2D0]">Société</span>
+                  <span className="font-semibold text-slate-900 dark:text-white text-right">
+                    {detailActivity.clientName}
+                  </span>
+                </div>
+              )}
+              {detailActivity.taskTitle && (
+                <div className="py-2.5 flex items-start justify-between gap-4">
+                  <span className="font-medium text-slate-600 dark:text-[#C8C2D0]">Tâche</span>
+                  <span className="font-semibold text-slate-900 dark:text-white text-right">
+                    {detailActivity.taskTitle}
+                  </span>
+                </div>
+              )}
               {(detailActivity.formFieldsSnapshot ?? [])
                 .slice()
                 .sort((a, b) => a.order - b.order)

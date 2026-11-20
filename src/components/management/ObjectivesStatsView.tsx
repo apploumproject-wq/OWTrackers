@@ -134,6 +134,128 @@ export function ObjectivesStatsView({
     return Array.from(map.values());
   }, [projects, qualityControls, treatmentActivities]);
 
+  const companyOptions = useMemo(() => {
+    const map = new Map<string, { id: string; label: string }>();
+    const scopedProjects =
+      projectFilter !== 'all' && projectFilter !== 'none'
+        ? projects.filter((p) => p.id === projectFilter)
+        : projectFilter === 'none'
+        ? []
+        : projects;
+    for (const p of scopedProjects) {
+      for (const c of p.companies ?? []) {
+        map.set(c.id, {
+          id: c.id,
+          label: projectFilter === 'all' ? `${c.name} (${p.name})` : c.name,
+        });
+      }
+    }
+    for (const a of treatmentActivities) {
+      if (!a.companyId) continue;
+      if (projectFilter === 'none' && a.projectId) continue;
+      if (projectFilter !== 'all' && projectFilter !== 'none' && a.projectId !== projectFilter)
+        continue;
+      if (!map.has(a.companyId)) {
+        const baseName = a.clientName?.trim() || a.companyId;
+        map.set(a.companyId, {
+          id: a.companyId,
+          label:
+            projectFilter === 'all' && a.projectName
+              ? `${baseName} (${a.projectName})`
+              : baseName,
+        });
+      }
+    }
+    for (const q of qualityControls) {
+      if (!q.companyId) continue;
+      if (projectFilter === 'none' && q.projectId) continue;
+      if (projectFilter !== 'all' && projectFilter !== 'none' && q.projectId !== projectFilter)
+        continue;
+      if (!map.has(q.companyId)) {
+        const baseName = q.companyName?.trim() || q.companyId;
+        map.set(q.companyId, {
+          id: q.companyId,
+          label:
+            projectFilter === 'all' && q.projectName
+              ? `${baseName} (${q.projectName})`
+              : baseName,
+        });
+      }
+    }
+    if (projectFilter === 'all' || projectFilter === 'none') {
+      for (const c of companies) {
+        if (!map.has(c.id)) {
+          map.set(c.id, {
+            id: c.id,
+            label: c.archived ? `${c.name} (archivée)` : c.name,
+          });
+        }
+      }
+    }
+    return Array.from(map.values());
+  }, [projects, treatmentActivities, qualityControls, companies, projectFilter]);
+
+  const taskOptions = useMemo(() => {
+    const map = new Map<string, { id: string; label: string }>();
+    const scopedProjects =
+      projectFilter !== 'all' && projectFilter !== 'none'
+        ? projects.filter((p) => p.id === projectFilter)
+        : projectFilter === 'none'
+        ? []
+        : projects;
+    for (const p of scopedProjects) {
+      for (const t of p.tasks ?? []) {
+        map.set(t.id, {
+          id: t.id,
+          label: projectFilter === 'all' ? `${t.name} (${p.name})` : t.name,
+        });
+      }
+    }
+    for (const a of treatmentActivities) {
+      if (!a.taskId) continue;
+      if (projectFilter === 'none' && a.projectId) continue;
+      if (projectFilter !== 'all' && projectFilter !== 'none' && a.projectId !== projectFilter)
+        continue;
+      if (!map.has(a.taskId)) {
+        const baseName = a.taskTitle?.trim() || a.taskId;
+        map.set(a.taskId, {
+          id: a.taskId,
+          label:
+            projectFilter === 'all' && a.projectName
+              ? `${baseName} (${a.projectName})`
+              : baseName,
+        });
+      }
+    }
+    for (const q of qualityControls) {
+      if (!q.taskId) continue;
+      if (projectFilter === 'none' && q.projectId) continue;
+      if (projectFilter !== 'all' && projectFilter !== 'none' && q.projectId !== projectFilter)
+        continue;
+      if (!map.has(q.taskId)) {
+        const baseName = q.taskName?.trim() || q.taskId;
+        map.set(q.taskId, {
+          id: q.taskId,
+          label:
+            projectFilter === 'all' && q.projectName
+              ? `${baseName} (${q.projectName})`
+              : baseName,
+        });
+      }
+    }
+    if (projectFilter === 'all' || projectFilter === 'none') {
+      for (const t of tasks) {
+        if (!map.has(t.id)) {
+          map.set(t.id, {
+            id: t.id,
+            label: t.archived ? `${t.name} (archivée)` : t.name,
+          });
+        }
+      }
+    }
+    return Array.from(map.values());
+  }, [projects, treatmentActivities, qualityControls, tasks, projectFilter]);
+
   const scopedEmployees = useMemo(() => {
     return allEmployeeAccounts.filter((e) => {
       if (isSupervisor && user.teamId && e.teamId !== user.teamId) return false;
@@ -568,6 +690,8 @@ export function ObjectivesStatsView({
             value={projectFilter}
             onChange={(e) => {
               setProjectFilter(e.target.value);
+              setCompanyFilter('all');
+              setTaskFilter('all');
               setSelectedCustomFieldKey('');
             }}
             className="px-3 py-2 text-xs border border-slate-300 dark:border-[#393342] rounded-lg bg-white dark:bg-[#211E27] text-slate-900 dark:text-white focus:outline-none focus:border-[#A83CE2]"
@@ -586,9 +710,9 @@ export function ObjectivesStatsView({
             className="px-3 py-2 text-xs border border-slate-300 dark:border-[#393342] rounded-lg bg-white dark:bg-[#211E27] text-slate-900 dark:text-white focus:outline-none focus:border-[#A83CE2]"
           >
             <option value="all">Toutes les sociétés</option>
-            {companies.map((c) => (
+            {companyOptions.map((c) => (
               <option key={c.id} value={c.id}>
-                {c.name} {c.archived ? '(archivée)' : ''}
+                {c.label}
               </option>
             ))}
           </select>
@@ -598,9 +722,9 @@ export function ObjectivesStatsView({
             className="px-3 py-2 text-xs border border-slate-300 dark:border-[#393342] rounded-lg bg-white dark:bg-[#211E27] text-slate-900 dark:text-white focus:outline-none focus:border-[#A83CE2]"
           >
             <option value="all">Toutes les tâches</option>
-            {tasks.map((t) => (
+            {taskOptions.map((t) => (
               <option key={t.id} value={t.id}>
-                {t.name} {t.archived ? '(archivée)' : ''}
+                {t.label}
               </option>
             ))}
           </select>

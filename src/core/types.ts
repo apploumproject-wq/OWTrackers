@@ -27,8 +27,6 @@ export type Permission =
   | 'view:management_dashboard'
   | 'manage:employees'
   | 'manage:teams'
-  | 'manage:clients'
-  | 'manage:tasks'
   | 'manage:schedules'
   | 'manage:quality'
   | 'view:objectives_stats'
@@ -50,8 +48,6 @@ export type NavModuleId =
   | 'mgmt_employees'
   | 'mgmt_teams'
   | 'mgmt_projects'
-  | 'mgmt_clients'
-  | 'mgmt_tasks'
   | 'mgmt_schedules'
   | 'mgmt_leaves'
   | 'planning'
@@ -254,6 +250,8 @@ export interface ActiveTimerSession {
   formVersionId?: string;
   formVersionNumber?: number;
   formFieldsSnapshot?: ProjectFormField[];
+  projectCompaniesSnapshot?: ProjectCompanyItem[];
+  projectTasksSnapshot?: ProjectTaskItem[];
   customResponses?: Record<string, CustomFieldValue>;
   taskId?: string;
   taskTitle: string;
@@ -515,6 +513,20 @@ export interface ProjectFormVersion {
   changeNote?: string;
 }
 
+export interface ProjectCompanyItem {
+  id: string;
+  name: string;
+  createdAt?: string;
+  updatedAt?: string;
+}
+
+export interface ProjectTaskItem {
+  id: string;
+  name: string;
+  createdAt?: string;
+  updatedAt?: string;
+}
+
 export interface ProjectRecord {
   id: string;
   name: string;
@@ -522,6 +534,8 @@ export interface ProjectRecord {
   clientName?: string;
   description: string;
   active: boolean;
+  companies?: ProjectCompanyItem[];
+  tasks?: ProjectTaskItem[];
   assignedTeamIds: string[];
   addedEmployeeIds: string[];
   excludedEmployeeIds: string[];

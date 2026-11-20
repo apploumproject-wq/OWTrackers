@@ -75,6 +75,90 @@ export function ReportsView({
     return Array.from(map.values());
   }, [projects, qualityControls]);
 
+  const companyOptions = useMemo(() => {
+    const map = new Map<string, { id: string; label: string }>();
+    const scopedProjects =
+      projectFilter !== 'all' && projectFilter !== 'none'
+        ? projects.filter((p) => p.id === projectFilter)
+        : projectFilter === 'none'
+        ? []
+        : projects;
+    for (const p of scopedProjects) {
+      for (const c of p.companies ?? []) {
+        map.set(c.id, {
+          id: c.id,
+          label: projectFilter === 'all' ? `${c.name} (${p.name})` : c.name,
+        });
+      }
+    }
+    for (const q of qualityControls) {
+      if (!q.companyId) continue;
+      if (projectFilter === 'none' && q.projectId) continue;
+      if (projectFilter !== 'all' && projectFilter !== 'none' && q.projectId !== projectFilter)
+        continue;
+      if (!map.has(q.companyId)) {
+        const baseName = q.companyName?.trim() || q.companyId;
+        map.set(q.companyId, {
+          id: q.companyId,
+          label:
+            projectFilter === 'all' && q.projectName
+              ? `${baseName} (${q.projectName})`
+              : baseName,
+        });
+      }
+    }
+    if (projectFilter === 'all' || projectFilter === 'none') {
+      for (const c of companies) {
+        if (!map.has(c.id)) {
+          map.set(c.id, { id: c.id, label: c.name });
+        }
+      }
+    }
+    return Array.from(map.values());
+  }, [projects, qualityControls, companies, projectFilter]);
+
+  const taskOptions = useMemo(() => {
+    const map = new Map<string, { id: string; label: string }>();
+    const scopedProjects =
+      projectFilter !== 'all' && projectFilter !== 'none'
+        ? projects.filter((p) => p.id === projectFilter)
+        : projectFilter === 'none'
+        ? []
+        : projects;
+    for (const p of scopedProjects) {
+      for (const t of p.tasks ?? []) {
+        map.set(t.id, {
+          id: t.id,
+          label: projectFilter === 'all' ? `${t.name} (${p.name})` : t.name,
+        });
+      }
+    }
+    for (const q of qualityControls) {
+      if (!q.taskId) continue;
+      if (projectFilter === 'none' && q.projectId) continue;
+      if (projectFilter !== 'all' && projectFilter !== 'none' && q.projectId !== projectFilter)
+        continue;
+      if (!map.has(q.taskId)) {
+        const baseName = q.taskName?.trim() || q.taskId;
+        map.set(q.taskId, {
+          id: q.taskId,
+          label:
+            projectFilter === 'all' && q.projectName
+              ? `${baseName} (${q.projectName})`
+              : baseName,
+        });
+      }
+    }
+    if (projectFilter === 'all' || projectFilter === 'none') {
+      for (const t of tasks) {
+        if (!map.has(t.id)) {
+          map.set(t.id, { id: t.id, label: t.name });
+        }
+      }
+    }
+    return Array.from(map.values());
+  }, [projects, qualityControls, tasks, projectFilter]);
+
   const filteredRows = useMemo(() => {
     return qualityControls.filter((q) => {
       if (isSupervisor && user.teamId && q.teamId !== user.teamId) return false;
@@ -273,7 +357,11 @@ export function ReportsView({
 
           <select
             value={projectFilter}
-            onChange={(e) => setProjectFilter(e.target.value)}
+            onChange={(e) => {
+              setProjectFilter(e.target.value);
+              setCompanyFilter('all');
+              setTaskFilter('all');
+            }}
             className="px-3 py-2 text-xs border border-slate-300 dark:border-[#393342] rounded-lg bg-white dark:bg-[#211E27] text-slate-900 dark:text-white focus:outline-none focus:border-[#A83CE2]"
           >
             <option value="all">Tous projets</option>
@@ -291,9 +379,9 @@ export function ReportsView({
             className="px-3 py-2 text-xs border border-slate-300 dark:border-[#393342] rounded-lg bg-white dark:bg-[#211E27] text-slate-900 dark:text-white focus:outline-none focus:border-[#A83CE2]"
           >
             <option value="all">Toutes sociétés</option>
-            {companies.map((c) => (
+            {companyOptions.map((c) => (
               <option key={c.id} value={c.id}>
-                {c.name}
+                {c.label}
               </option>
             ))}
           </select>
@@ -304,9 +392,9 @@ export function ReportsView({
             className="px-3 py-2 text-xs border border-slate-300 dark:border-[#393342] rounded-lg bg-white dark:bg-[#211E27] text-slate-900 dark:text-white focus:outline-none focus:border-[#A83CE2]"
           >
             <option value="all">Toutes tâches</option>
-            {tasks.map((t) => (
+            {taskOptions.map((t) => (
               <option key={t.id} value={t.id}>
-                {t.name}
+                {t.label}
               </option>
             ))}
           </select>

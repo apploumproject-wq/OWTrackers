@@ -1,8 +1,10 @@
 import React, { useMemo, useState } from 'react';
 import {
+  Building2,
   ArrowDown,
   ArrowUp,
   Check,
+  ClipboardList,
   Copy,
   Edit3,
   Eye,
@@ -21,10 +23,12 @@ import {
   AppUser,
   FormTemplate,
   ManagedEmployee,
+  ProjectCompanyItem,
   ProjectFieldType,
   ProjectFormField,
   ProjectFormVersion,
   ProjectRecord,
+  ProjectTaskItem,
   TeamRecord,
 } from '../../core/types';
 import { PROJECT_FIELD_TYPE_LABELS } from '../../core/permissions';
@@ -45,6 +49,8 @@ interface ProjectsManagementViewProps {
     fields?: ProjectFormField[];
     assignedTeamIds?: string[];
     addedEmployeeIds?: string[];
+    companies?: string[];
+    tasks?: string[];
   }) => { created?: ProjectRecord; error?: string };
   onUpdateProjectInfo: (
     projectId: string,
@@ -64,6 +70,20 @@ interface ProjectsManagementViewProps {
     employeeId: string,
     assigned: boolean
   ) => { error?: string };
+  onAddProjectCompany: (projectId: string, name: string) => { error?: string };
+  onUpdateProjectCompany: (
+    projectId: string,
+    companyId: string,
+    name: string
+  ) => { error?: string };
+  onRemoveProjectCompany: (projectId: string, companyId: string) => { error?: string };
+  onAddProjectTask: (projectId: string, name: string) => { error?: string };
+  onUpdateProjectTask: (
+    projectId: string,
+    taskId: string,
+    name: string
+  ) => { error?: string };
+  onRemoveProjectTask: (projectId: string, taskId: string) => { error?: string };
   onPublishProjectFormVersion: (
     projectId: string,
     fields: ProjectFormField[],
@@ -369,25 +389,66 @@ function FieldBuilderList({ fields, readOnly = false, onChange }: FieldBuilderLi
   );
 }
 
-export function FormFieldsPreview({ fields }: { fields: ProjectFormField[] }) {
+export function FormFieldsPreview({
+  fields,
+  companies = [],
+  tasks = [],
+}: {
+  fields: ProjectFormField[];
+  companies?: ProjectCompanyItem[];
+  tasks?: ProjectTaskItem[];
+}) {
   const activeFields = useMemo(
     () => [...fields].filter((f) => f.active).sort((a, b) => a.order - b.order),
     [fields]
   );
-
-  if (activeFields.length === 0) {
-    return (
-      <div className="text-xs text-slate-500 dark:text-[#C8C2D0] py-4">
-        Aucun champ spécifique actif pour ce formulaire. Seuls les champs communs du traitement s’afficheront.
-      </div>
-    );
-  }
 
   const inputClass =
     'w-full px-3 py-2 text-xs bg-white dark:bg-[#211E27] text-slate-900 dark:text-white border border-slate-300 dark:border-[#393342] rounded-lg';
 
   return (
     <div className="grid grid-cols-1 md:grid-cols-2 gap-4">
+      <div>
+        <label className="block text-xs font-medium text-slate-700 dark:text-[#C8C2D0] mb-1.5">
+          Société {companies.length > 0 && <span className="text-red-600 dark:text-red-400">*</span>}
+        </label>
+        <select disabled className={inputClass}>
+          <option value="">
+            {companies.length === 0
+              ? 'Aucune société configurée pour ce projet'
+              : 'Sélectionner une société...'}
+          </option>
+          {companies.map((c) => (
+            <option key={c.id} value={c.id}>
+              {c.name}
+            </option>
+          ))}
+        </select>
+      </div>
+      <div>
+        <label className="block text-xs font-medium text-slate-700 dark:text-[#C8C2D0] mb-1.5">
+          Tâche {tasks.length > 0 && <span className="text-red-600 dark:text-red-400">*</span>}
+        </label>
+        <select disabled className={inputClass}>
+          <option value="">
+            {tasks.length === 0
+              ? 'Aucune tâche configurée pour ce projet'
+              : 'Sélectionner une tâche...'}
+          </option>
+          {tasks.map((t) => (
+            <option key={t.id} value={t.id}>
+              {t.name}
+            </option>
+          ))}
+        </select>
+      </div>
+
+      {activeFields.length === 0 && (
+        <div className="md:col-span-2 text-xs text-slate-500 dark:text-[#C8C2D0] py-2">
+          Aucun champ personnalisé supplémentaire actif dans cette version.
+        </div>
+      )}
+
       {activeFields.map((field) => (
         <div
           key={field.id}
@@ -463,6 +524,12 @@ export function ProjectsManagementView({
   onToggleProjectActive,
   onUpdateProjectAssignments,
   onToggleEmployeeProjectAssignment,
+  onAddProjectCompany,
+  onUpdateProjectCompany,
+  onRemoveProjectCompany,
+  onAddProjectTask,
+  onUpdateProjectTask,
+  onRemoveProjectTask,
   onPublishProjectFormVersion,
   onCreateFormTemplate,
   onUpdateFormTemplate,
@@ -487,6 +554,14 @@ export function ProjectsManagementView({
     formTemplates[0] ? cloneFieldsForEditor(formTemplates[0].fields) : []
   );
   const [newTeamIds, setNewTeamIds] = useState<string[]>([]);
+  const [newCompanies, setNewCompanies] = useState<string[]>([]);
+  const [newCompanyInput, setNewCompanyInput] = useState('');
+  const [newTasks, setNewTasks] = useState<string[]>([]);
+  const [newTaskInput, setNewTaskInput] = useState('');
+  const [editingNewCompanyIdx, setEditingNewCompanyIdx] = useState<number | null>(null);
+  const [editingNewCompanyValue, setEditingNewCompanyValue] = useState('');
+  const [editingNewTaskIdx, setEditingNewTaskIdx] = useState<number | null>(null);
+  const [editingNewTaskValue, setEditingNewTaskValue] = useState('');
   const [createError, setCreateError] = useState<string | null>(null);
 
   // Edition infos projet sélectionné
@@ -500,6 +575,14 @@ export function ProjectsManagementView({
   const [infoCode, setInfoCode] = useState('');
   const [infoDesc, setInfoDesc] = useState('');
   const [empSearch, setEmpSearch] = useState('');
+
+  // Gestion sociétés & tâches du projet sélectionné
+  const [projectCompanyInput, setProjectCompanyInput] = useState('');
+  const [editingProjectCompanyId, setEditingProjectCompanyId] = useState<string | null>(null);
+  const [editingProjectCompanyName, setEditingProjectCompanyName] = useState('');
+  const [projectTaskInput, setProjectTaskInput] = useState('');
+  const [editingProjectTaskId, setEditingProjectTaskId] = useState<string | null>(null);
+  const [editingProjectTaskName, setEditingProjectTaskName] = useState('');
 
   // Edition formulaire projet (brouillon avant publication vN+1)
   const [draftFields, setDraftFields] = useState<ProjectFormField[]>([]);
@@ -527,6 +610,12 @@ export function ProjectsManagementView({
     setInfoName(proj.name);
     setInfoCode(proj.code);
     setInfoDesc(proj.description);
+    setProjectCompanyInput('');
+    setEditingProjectCompanyId(null);
+    setEditingProjectCompanyName('');
+    setProjectTaskInput('');
+    setEditingProjectTaskId(null);
+    setEditingProjectTaskName('');
     const latest =
       proj.formVersions.find((v) => v.id === proj.currentFormVersionId) ??
       proj.formVersions[proj.formVersions.length - 1];
@@ -585,8 +674,72 @@ export function ProjectsManagementView({
     setNewTemplateId(firstTpl?.id ?? '');
     setNewFields(firstTpl ? cloneFieldsForEditor(firstTpl.fields) : []);
     setNewTeamIds([]);
+    setNewCompanies([]);
+    setNewCompanyInput('');
+    setNewTasks([]);
+    setNewTaskInput('');
+    setEditingNewCompanyIdx(null);
+    setEditingNewCompanyValue('');
+    setEditingNewTaskIdx(null);
+    setEditingNewTaskValue('');
     setCreateError(null);
     setShowCreateModal(true);
+  };
+
+  const handleAddDraftCompany = () => {
+    const clean = newCompanyInput.trim();
+    if (!clean) return;
+    if (newCompanies.some((c) => c.toLowerCase() === clean.toLowerCase())) {
+      setCreateError(`La société « ${clean} » est déjà ajoutée dans ce projet.`);
+      return;
+    }
+    setCreateError(null);
+    setNewCompanies((prev) => [...prev, clean]);
+    setNewCompanyInput('');
+  };
+
+  const handleSaveDraftCompanyEdit = (idx: number) => {
+    const clean = editingNewCompanyValue.trim();
+    if (!clean) {
+      setCreateError('Le nom de la société ne peut pas être vide.');
+      return;
+    }
+    if (newCompanies.some((c, i) => i !== idx && c.toLowerCase() === clean.toLowerCase())) {
+      setCreateError(`Une autre société porte déjà le nom « ${clean} » dans ce projet.`);
+      return;
+    }
+    setCreateError(null);
+    setNewCompanies((prev) => prev.map((c, i) => (i === idx ? clean : c)));
+    setEditingNewCompanyIdx(null);
+    setEditingNewCompanyValue('');
+  };
+
+  const handleAddDraftTask = () => {
+    const clean = newTaskInput.trim();
+    if (!clean) return;
+    if (newTasks.some((t) => t.toLowerCase() === clean.toLowerCase())) {
+      setCreateError(`La tâche « ${clean} » est déjà ajoutée dans ce projet.`);
+      return;
+    }
+    setCreateError(null);
+    setNewTasks((prev) => [...prev, clean]);
+    setNewTaskInput('');
+  };
+
+  const handleSaveDraftTaskEdit = (idx: number) => {
+    const clean = editingNewTaskValue.trim();
+    if (!clean) {
+      setCreateError('Le nom de la tâche ne peut pas être vide.');
+      return;
+    }
+    if (newTasks.some((t, i) => i !== idx && t.toLowerCase() === clean.toLowerCase())) {
+      setCreateError(`Une autre tâche porte déjà le nom « ${clean} » dans ce projet.`);
+      return;
+    }
+    setCreateError(null);
+    setNewTasks((prev) => prev.map((t, i) => (i === idx ? clean : t)));
+    setEditingNewTaskIdx(null);
+    setEditingNewTaskValue('');
   };
 
   const handleCreateSubmit = (e: React.FormEvent) => {
@@ -600,6 +753,8 @@ export function ProjectsManagementView({
       templateId: tpl?.id,
       fields: newFields,
       assignedTeamIds: newTeamIds,
+      companies: newCompanies,
+      tasks: newTasks,
     });
     if (res.error) {
       setCreateError(res.error);
@@ -610,7 +765,7 @@ export function ProjectsManagementView({
       setSelectedProjectId(res.created.id);
       syncSelectedProjectDrafts(res.created);
     }
-    setBannerSuccess('Projet créé avec sa première version de formulaire (v1).');
+    setBannerSuccess('Projet créé avec ses sociétés, tâches et formulaire v1.');
     setBannerError(null);
   };
 
@@ -629,6 +784,88 @@ export function ProjectsManagementView({
       return;
     }
     setBannerSuccess('Informations du projet enregistrées.');
+  };
+
+  const handleAddSelectedCompany = () => {
+    if (!selectedProject || !canManage) return;
+    setBannerError(null);
+    setBannerSuccess(null);
+    const res = onAddProjectCompany(selectedProject.id, projectCompanyInput);
+    if (res.error) {
+      setBannerError(res.error);
+      return;
+    }
+    setProjectCompanyInput('');
+    setBannerSuccess('Société ajoutée au projet.');
+  };
+
+  const handleSaveSelectedCompany = (companyId: string) => {
+    if (!selectedProject || !canManage) return;
+    setBannerError(null);
+    setBannerSuccess(null);
+    const res = onUpdateProjectCompany(
+      selectedProject.id,
+      companyId,
+      editingProjectCompanyName
+    );
+    if (res.error) {
+      setBannerError(res.error);
+      return;
+    }
+    setEditingProjectCompanyId(null);
+    setEditingProjectCompanyName('');
+    setBannerSuccess('Société modifiée pour ce projet.');
+  };
+
+  const handleRemoveSelectedCompany = (companyId: string) => {
+    if (!selectedProject || !canManage) return;
+    setBannerError(null);
+    setBannerSuccess(null);
+    const res = onRemoveProjectCompany(selectedProject.id, companyId);
+    if (res.error) {
+      setBannerError(res.error);
+      return;
+    }
+    setBannerSuccess('Société retirée du projet (les traitements passés restent conservés).');
+  };
+
+  const handleAddSelectedTask = () => {
+    if (!selectedProject || !canManage) return;
+    setBannerError(null);
+    setBannerSuccess(null);
+    const res = onAddProjectTask(selectedProject.id, projectTaskInput);
+    if (res.error) {
+      setBannerError(res.error);
+      return;
+    }
+    setProjectTaskInput('');
+    setBannerSuccess('Tâche ajoutée au projet.');
+  };
+
+  const handleSaveSelectedTask = (taskId: string) => {
+    if (!selectedProject || !canManage) return;
+    setBannerError(null);
+    setBannerSuccess(null);
+    const res = onUpdateProjectTask(selectedProject.id, taskId, editingProjectTaskName);
+    if (res.error) {
+      setBannerError(res.error);
+      return;
+    }
+    setEditingProjectTaskId(null);
+    setEditingProjectTaskName('');
+    setBannerSuccess('Tâche modifiée pour ce projet.');
+  };
+
+  const handleRemoveSelectedTask = (taskId: string) => {
+    if (!selectedProject || !canManage) return;
+    setBannerError(null);
+    setBannerSuccess(null);
+    const res = onRemoveProjectTask(selectedProject.id, taskId);
+    if (res.error) {
+      setBannerError(res.error);
+      return;
+    }
+    setBannerSuccess('Tâche retirée du projet (les traitements passés restent conservés).');
   };
 
   const handleToggleTeam = (teamId: string) => {
@@ -899,8 +1136,7 @@ export function ProjectsManagementView({
                       </div>
                       <div className="text-[11px] text-slate-500 dark:text-[#C8C2D0] mt-1 flex items-center justify-between gap-2">
                         <span className="truncate">
-                          {proj.description?.trim() ||
-                            `${proj.assignedTeamIds.length} équipe(s)`}
+                          {(proj.companies ?? []).length} soc. · {(proj.tasks ?? []).length} tâche(s)
                         </span>
                         <span className="font-mono shrink-0">
                           {empCount} emp. · v{proj.currentFormVersionNumber}
@@ -1016,62 +1252,311 @@ export function ProjectsManagementView({
 
                 <div className="p-5 sm:p-6">
                   {detailTab === 'info' && (
-                    <form onSubmit={handleSaveInfo} className="space-y-4">
-                      <div className="grid grid-cols-1 sm:grid-cols-2 gap-4 text-xs">
-                        <div>
-                          <label className="block font-medium text-slate-700 dark:text-[#C8C2D0] mb-1">
-                            Nom du projet *
-                          </label>
-                          <input
-                            type="text"
-                            disabled={!canManage}
-                            value={infoName}
-                            onChange={(e) => setInfoName(e.target.value)}
-                            className={inputClass}
-                          />
+                    <div className="space-y-6">
+                      <form onSubmit={handleSaveInfo} className="space-y-4">
+                        <div className="grid grid-cols-1 sm:grid-cols-2 gap-4 text-xs">
+                          <div>
+                            <label className="block font-medium text-slate-700 dark:text-[#C8C2D0] mb-1">
+                              Nom du projet *
+                            </label>
+                            <input
+                              type="text"
+                              disabled={!canManage}
+                              value={infoName}
+                              onChange={(e) => setInfoName(e.target.value)}
+                              className={inputClass}
+                            />
+                          </div>
+                          <div>
+                            <label className="block font-medium text-slate-700 dark:text-[#C8C2D0] mb-1">
+                              Code projet *
+                            </label>
+                            <input
+                              type="text"
+                              disabled={!canManage}
+                              value={infoCode}
+                              onChange={(e) => setInfoCode(e.target.value)}
+                              className={`${inputClass} font-mono`}
+                            />
+                          </div>
+                          <div className="sm:col-span-2">
+                            <label className="block font-medium text-slate-700 dark:text-[#C8C2D0] mb-1">
+                              Description
+                            </label>
+                            <textarea
+                              rows={3}
+                              disabled={!canManage}
+                              value={infoDesc}
+                              onChange={(e) => setInfoDesc(e.target.value)}
+                              placeholder="Objectif métier, consignes de traitement..."
+                              className={inputClass}
+                            />
+                          </div>
                         </div>
-                        <div>
-                          <label className="block font-medium text-slate-700 dark:text-[#C8C2D0] mb-1">
-                            Code projet *
-                          </label>
-                          <input
-                            type="text"
-                            disabled={!canManage}
-                            value={infoCode}
-                            onChange={(e) => setInfoCode(e.target.value)}
-                            className={`${inputClass} font-mono`}
-                          />
-                        </div>
-                        <div className="sm:col-span-2">
-                          <label className="block font-medium text-slate-700 dark:text-[#C8C2D0] mb-1">
-                            Description
-                          </label>
-                          <textarea
-                            rows={3}
-                            disabled={!canManage}
-                            value={infoDesc}
-                            onChange={(e) => setInfoDesc(e.target.value)}
-                            placeholder="Objectif métier, consignes de traitement..."
-                            className={inputClass}
-                          />
-                        </div>
-                      </div>
 
-                      <div className="pt-3 border-t border-slate-100 dark:border-[#393342] flex flex-wrap items-center justify-between gap-3 text-xs text-slate-500 dark:text-[#C8C2D0]">
-                        <span>
-                          Créé par {selectedProject.createdByName} le{' '}
-                          {formatDateTimeFr(selectedProject.createdAt)} · Historique conservé même en cas de désactivation.
-                        </span>
-                        {canManage && (
-                          <button
-                            type="submit"
-                            className="px-4 py-2 bg-[#A83CE2] hover:bg-[#7624A8] text-white font-semibold rounded-lg cursor-pointer"
-                          >
-                            Enregistrer les informations
-                          </button>
-                        )}
+                        <div className="pt-3 border-t border-slate-100 dark:border-[#393342] flex flex-wrap items-center justify-between gap-3 text-xs text-slate-500 dark:text-[#C8C2D0]">
+                          <span>
+                            Créé par {selectedProject.createdByName} le{' '}
+                            {formatDateTimeFr(selectedProject.createdAt)} · Historique conservé même en cas de désactivation.
+                          </span>
+                          {canManage && (
+                            <button
+                              type="submit"
+                              className="px-4 py-2 bg-[#A83CE2] hover:bg-[#7624A8] text-white font-semibold rounded-lg cursor-pointer"
+                            >
+                              Enregistrer les informations
+                            </button>
+                          )}
+                        </div>
+                      </form>
+
+                      {/* A. Sociétés du projet & B. Tâches du projet */}
+                      <div className="pt-5 border-t border-slate-200 dark:border-[#393342] grid grid-cols-1 xl:grid-cols-2 gap-6">
+                        {/* A. Sociétés du projet */}
+                        <div className="bg-slate-50/70 dark:bg-[#211E27] border border-slate-200 dark:border-[#393342] rounded-lg p-4 space-y-3">
+                          <div className="flex items-center justify-between gap-2">
+                            <div className="flex items-center gap-2">
+                              <Building2 className="w-4 h-4 text-[#A83CE2] shrink-0" aria-hidden="true" />
+                              <h3 className="text-xs font-bold text-slate-900 dark:text-white">
+                                A. Sociétés du projet ({(selectedProject.companies ?? []).length})
+                              </h3>
+                            </div>
+                          </div>
+                          <p className="text-[11px] text-slate-500 dark:text-[#C8C2D0]">
+                            Liste strictement rattachée à « {selectedProject.name} ». Affichée dans le formulaire de traitement de ce projet.
+                          </p>
+
+                          {canManage && (
+                            <div className="flex gap-2">
+                              <input
+                                type="text"
+                                value={projectCompanyInput}
+                                onChange={(e) => setProjectCompanyInput(e.target.value)}
+                                onKeyDown={(e) => {
+                                  if (e.key === 'Enter') {
+                                    e.preventDefault();
+                                    handleAddSelectedCompany();
+                                  }
+                                }}
+                                placeholder="Nom de la société..."
+                                className={inputClass}
+                              />
+                              <button
+                                type="button"
+                                onClick={handleAddSelectedCompany}
+                                className="inline-flex items-center gap-1 px-3 py-2 bg-[#A83CE2] hover:bg-[#7624A8] text-white text-xs font-semibold rounded-lg cursor-pointer whitespace-nowrap shrink-0"
+                              >
+                                <Plus className="w-3.5 h-3.5" aria-hidden="true" />
+                                <span>Ajouter</span>
+                              </button>
+                            </div>
+                          )}
+
+                          {(selectedProject.companies ?? []).length === 0 ? (
+                            <div className="text-xs text-slate-500 dark:text-[#C8C2D0] py-2">
+                              Aucune société configurée pour ce projet.
+                            </div>
+                          ) : (
+                            <div className="divide-y divide-slate-200 dark:divide-[#393342] border border-slate-200 dark:border-[#393342] rounded-lg bg-white dark:bg-[#292631]">
+                              {(selectedProject.companies ?? []).map((comp) => {
+                                const isEditing = editingProjectCompanyId === comp.id;
+                                return (
+                                  <div
+                                    key={comp.id}
+                                    className="px-3 py-2 flex items-center justify-between gap-2 text-xs"
+                                  >
+                                    {isEditing ? (
+                                      <div className="flex-1 flex items-center gap-2">
+                                        <input
+                                          type="text"
+                                          value={editingProjectCompanyName}
+                                          onChange={(e) =>
+                                            setEditingProjectCompanyName(e.target.value)
+                                          }
+                                          onKeyDown={(e) => {
+                                            if (e.key === 'Enter') {
+                                              e.preventDefault();
+                                              handleSaveSelectedCompany(comp.id);
+                                            }
+                                          }}
+                                          className={inputClass}
+                                        />
+                                        <button
+                                          type="button"
+                                          onClick={() => handleSaveSelectedCompany(comp.id)}
+                                          className="px-2.5 py-1.5 bg-[#A83CE2] hover:bg-[#7624A8] text-white font-semibold rounded cursor-pointer"
+                                        >
+                                          Valider
+                                        </button>
+                                        <button
+                                          type="button"
+                                          onClick={() => {
+                                            setEditingProjectCompanyId(null);
+                                            setEditingProjectCompanyName('');
+                                          }}
+                                          className="px-2 py-1.5 text-slate-500 dark:text-[#C8C2D0] hover:text-slate-900 dark:hover:text-white cursor-pointer"
+                                        >
+                                          Annuler
+                                        </button>
+                                      </div>
+                                    ) : (
+                                      <>
+                                        <span className="font-medium text-slate-900 dark:text-white truncate">
+                                          {comp.name}
+                                        </span>
+                                        {canManage && (
+                                          <div className="flex items-center gap-1.5 shrink-0">
+                                            <button
+                                              type="button"
+                                              onClick={() => {
+                                                setEditingProjectCompanyId(comp.id);
+                                                setEditingProjectCompanyName(comp.name);
+                                              }}
+                                              className="px-2 py-1 text-[11px] font-semibold text-[#7624A8] dark:text-[#D896FF] hover:bg-[#F7EEFC] dark:hover:bg-[#A83CE2]/20 rounded cursor-pointer"
+                                            >
+                                              Modifier
+                                            </button>
+                                            <button
+                                              type="button"
+                                              onClick={() => handleRemoveSelectedCompany(comp.id)}
+                                              className="p-1 text-slate-400 hover:text-red-600 dark:hover:text-red-400 cursor-pointer"
+                                              aria-label={`Retirer ${comp.name}`}
+                                            >
+                                              <Trash2 className="w-3.5 h-3.5" aria-hidden="true" />
+                                            </button>
+                                          </div>
+                                        )}
+                                      </>
+                                    )}
+                                  </div>
+                                );
+                              })}
+                            </div>
+                          )}
+                        </div>
+
+                        {/* B. Tâches du projet */}
+                        <div className="bg-slate-50/70 dark:bg-[#211E27] border border-slate-200 dark:border-[#393342] rounded-lg p-4 space-y-3">
+                          <div className="flex items-center justify-between gap-2">
+                            <div className="flex items-center gap-2">
+                              <ClipboardList className="w-4 h-4 text-[#A83CE2] shrink-0" aria-hidden="true" />
+                              <h3 className="text-xs font-bold text-slate-900 dark:text-white">
+                                B. Tâches du projet ({(selectedProject.tasks ?? []).length})
+                              </h3>
+                            </div>
+                          </div>
+                          <p className="text-[11px] text-slate-500 dark:text-[#C8C2D0]">
+                            Liste strictement rattachée à « {selectedProject.name} ». Indépendante des autres projets.
+                          </p>
+
+                          {canManage && (
+                            <div className="flex gap-2">
+                              <input
+                                type="text"
+                                value={projectTaskInput}
+                                onChange={(e) => setProjectTaskInput(e.target.value)}
+                                onKeyDown={(e) => {
+                                  if (e.key === 'Enter') {
+                                    e.preventDefault();
+                                    handleAddSelectedTask();
+                                  }
+                                }}
+                                placeholder="Nom de la tâche..."
+                                className={inputClass}
+                              />
+                              <button
+                                type="button"
+                                onClick={handleAddSelectedTask}
+                                className="inline-flex items-center gap-1 px-3 py-2 bg-[#A83CE2] hover:bg-[#7624A8] text-white text-xs font-semibold rounded-lg cursor-pointer whitespace-nowrap shrink-0"
+                              >
+                                <Plus className="w-3.5 h-3.5" aria-hidden="true" />
+                                <span>Ajouter</span>
+                              </button>
+                            </div>
+                          )}
+
+                          {(selectedProject.tasks ?? []).length === 0 ? (
+                            <div className="text-xs text-slate-500 dark:text-[#C8C2D0] py-2">
+                              Aucune tâche configurée pour ce projet.
+                            </div>
+                          ) : (
+                            <div className="divide-y divide-slate-200 dark:divide-[#393342] border border-slate-200 dark:border-[#393342] rounded-lg bg-white dark:bg-[#292631]">
+                              {(selectedProject.tasks ?? []).map((task) => {
+                                const isEditing = editingProjectTaskId === task.id;
+                                return (
+                                  <div
+                                    key={task.id}
+                                    className="px-3 py-2 flex items-center justify-between gap-2 text-xs"
+                                  >
+                                    {isEditing ? (
+                                      <div className="flex-1 flex items-center gap-2">
+                                        <input
+                                          type="text"
+                                          value={editingProjectTaskName}
+                                          onChange={(e) => setEditingProjectTaskName(e.target.value)}
+                                          onKeyDown={(e) => {
+                                            if (e.key === 'Enter') {
+                                              e.preventDefault();
+                                              handleSaveSelectedTask(task.id);
+                                            }
+                                          }}
+                                          className={inputClass}
+                                        />
+                                        <button
+                                          type="button"
+                                          onClick={() => handleSaveSelectedTask(task.id)}
+                                          className="px-2.5 py-1.5 bg-[#A83CE2] hover:bg-[#7624A8] text-white font-semibold rounded cursor-pointer"
+                                        >
+                                          Valider
+                                        </button>
+                                        <button
+                                          type="button"
+                                          onClick={() => {
+                                            setEditingProjectTaskId(null);
+                                            setEditingProjectTaskName('');
+                                          }}
+                                          className="px-2 py-1.5 text-slate-500 dark:text-[#C8C2D0] hover:text-slate-900 dark:hover:text-white cursor-pointer"
+                                        >
+                                          Annuler
+                                        </button>
+                                      </div>
+                                    ) : (
+                                      <>
+                                        <span className="font-medium text-slate-900 dark:text-white truncate">
+                                          {task.name}
+                                        </span>
+                                        {canManage && (
+                                          <div className="flex items-center gap-1.5 shrink-0">
+                                            <button
+                                              type="button"
+                                              onClick={() => {
+                                                setEditingProjectTaskId(task.id);
+                                                setEditingProjectTaskName(task.name);
+                                              }}
+                                              className="px-2 py-1 text-[11px] font-semibold text-[#7624A8] dark:text-[#D896FF] hover:bg-[#F7EEFC] dark:hover:bg-[#A83CE2]/20 rounded cursor-pointer"
+                                            >
+                                              Modifier
+                                            </button>
+                                            <button
+                                              type="button"
+                                              onClick={() => handleRemoveSelectedTask(task.id)}
+                                              className="p-1 text-slate-400 hover:text-red-600 dark:hover:text-red-400 cursor-pointer"
+                                              aria-label={`Retirer ${task.name}`}
+                                            >
+                                              <Trash2 className="w-3.5 h-3.5" aria-hidden="true" />
+                                            </button>
+                                          </div>
+                                        )}
+                                      </>
+                                    )}
+                                  </div>
+                                );
+                              })}
+                            </div>
+                          )}
+                        </div>
                       </div>
-                    </form>
+                    </div>
                   )}
 
                   {detailTab === 'assignments' && (
@@ -1383,11 +1868,15 @@ export function ProjectsManagementView({
                             {selectedProject.currentFormVersionNumber}
                           </h3>
                           <p className="text-xs text-slate-500 dark:text-[#C8C2D0]">
-                            Les champs désactivés sont masqués. Les champs communs standard restent disponibles lors du traitement.
+                            Inclut les listes « Société » et « Tâche » propres à ce projet ainsi que les champs personnalisés actifs.
                           </p>
                         </div>
                       </div>
-                      <FormFieldsPreview fields={latestVersion?.fields ?? []} />
+                      <FormFieldsPreview
+                        fields={latestVersion?.fields ?? []}
+                        companies={selectedProject.companies ?? []}
+                        tasks={selectedProject.tasks ?? []}
+                      />
                     </div>
                   )}
                 </div>
@@ -1647,6 +2136,203 @@ export function ProjectsManagementView({
                 </div>
               </div>
             )}
+
+            {/* A. Sociétés du projet & B. Tâches du projet */}
+            <div className="grid grid-cols-1 md:grid-cols-2 gap-4 pt-2 border-t border-slate-200 dark:border-[#393342]">
+              <div className="bg-slate-50/70 dark:bg-[#211E27] border border-slate-200 dark:border-[#393342] rounded-lg p-3.5 space-y-2.5">
+                <div className="flex items-center gap-1.5 text-xs font-semibold text-slate-800 dark:text-white">
+                  <Building2 className="w-3.5 h-3.5 text-[#A83CE2]" aria-hidden="true" />
+                  <span>A. Sociétés du projet ({newCompanies.length})</span>
+                </div>
+                <div className="flex gap-2">
+                  <input
+                    type="text"
+                    value={newCompanyInput}
+                    onChange={(e) => setNewCompanyInput(e.target.value)}
+                    onKeyDown={(e) => {
+                      if (e.key === 'Enter') {
+                        e.preventDefault();
+                        handleAddDraftCompany();
+                      }
+                    }}
+                    placeholder="Ajouter une société..."
+                    className={inputClass}
+                  />
+                  <button
+                    type="button"
+                    onClick={handleAddDraftCompany}
+                    className="px-3 py-1.5 bg-[#A83CE2] hover:bg-[#7624A8] text-white text-xs font-semibold rounded-lg cursor-pointer shrink-0"
+                  >
+                    Ajouter
+                  </button>
+                </div>
+                {newCompanies.length === 0 ? (
+                  <div className="text-[11px] text-slate-500 dark:text-[#C8C2D0]">
+                    Aucune société ajoutée pour le moment (modifiable ensuite).
+                  </div>
+                ) : (
+                  <div className="divide-y divide-slate-200 dark:divide-[#393342] border border-slate-200 dark:border-[#393342] rounded bg-white dark:bg-[#292631]">
+                    {newCompanies.map((cName, idx) => (
+                      <div key={`${cName}-${idx}`} className="px-2.5 py-1.5 flex items-center justify-between gap-2 text-xs">
+                        {editingNewCompanyIdx === idx ? (
+                          <div className="flex-1 flex items-center gap-1.5">
+                            <input
+                              type="text"
+                              value={editingNewCompanyValue}
+                              onChange={(e) => setEditingNewCompanyValue(e.target.value)}
+                              onKeyDown={(e) => {
+                                if (e.key === 'Enter') {
+                                  e.preventDefault();
+                                  handleSaveDraftCompanyEdit(idx);
+                                }
+                              }}
+                              className={inputClass}
+                            />
+                            <button
+                              type="button"
+                              onClick={() => handleSaveDraftCompanyEdit(idx)}
+                              className="px-2 py-1 bg-[#A83CE2] text-white rounded text-[11px] font-semibold cursor-pointer"
+                            >
+                              OK
+                            </button>
+                            <button
+                              type="button"
+                              onClick={() => setEditingNewCompanyIdx(null)}
+                              className="px-1.5 py-1 text-slate-500 text-[11px] cursor-pointer"
+                            >
+                              Annuler
+                            </button>
+                          </div>
+                        ) : (
+                          <>
+                            <span className="text-slate-900 dark:text-white truncate">{cName}</span>
+                            <div className="flex items-center gap-1 shrink-0">
+                              <button
+                                type="button"
+                                onClick={() => {
+                                  setEditingNewCompanyIdx(idx);
+                                  setEditingNewCompanyValue(cName);
+                                }}
+                                className="px-1.5 py-0.5 text-[11px] font-semibold text-[#7624A8] dark:text-[#D896FF] cursor-pointer"
+                              >
+                                Modifier
+                              </button>
+                              <button
+                                type="button"
+                                onClick={() =>
+                                  setNewCompanies((prev) => prev.filter((_, i) => i !== idx))
+                                }
+                                className="p-1 text-slate-400 hover:text-red-600 cursor-pointer"
+                                aria-label={`Retirer ${cName}`}
+                              >
+                                <Trash2 className="w-3 h-3" aria-hidden="true" />
+                              </button>
+                            </div>
+                          </>
+                        )}
+                      </div>
+                    ))}
+                  </div>
+                )}
+              </div>
+
+              <div className="bg-slate-50/70 dark:bg-[#211E27] border border-slate-200 dark:border-[#393342] rounded-lg p-3.5 space-y-2.5">
+                <div className="flex items-center gap-1.5 text-xs font-semibold text-slate-800 dark:text-white">
+                  <ClipboardList className="w-3.5 h-3.5 text-[#A83CE2]" aria-hidden="true" />
+                  <span>B. Tâches du projet ({newTasks.length})</span>
+                </div>
+                <div className="flex gap-2">
+                  <input
+                    type="text"
+                    value={newTaskInput}
+                    onChange={(e) => setNewTaskInput(e.target.value)}
+                    onKeyDown={(e) => {
+                      if (e.key === 'Enter') {
+                        e.preventDefault();
+                        handleAddDraftTask();
+                      }
+                    }}
+                    placeholder="Ajouter une tâche..."
+                    className={inputClass}
+                  />
+                  <button
+                    type="button"
+                    onClick={handleAddDraftTask}
+                    className="px-3 py-1.5 bg-[#A83CE2] hover:bg-[#7624A8] text-white text-xs font-semibold rounded-lg cursor-pointer shrink-0"
+                  >
+                    Ajouter
+                  </button>
+                </div>
+                {newTasks.length === 0 ? (
+                  <div className="text-[11px] text-slate-500 dark:text-[#C8C2D0]">
+                    Aucune tâche ajoutée pour le moment (modifiable ensuite).
+                  </div>
+                ) : (
+                  <div className="divide-y divide-slate-200 dark:divide-[#393342] border border-slate-200 dark:border-[#393342] rounded bg-white dark:bg-[#292631]">
+                    {newTasks.map((tName, idx) => (
+                      <div key={`${tName}-${idx}`} className="px-2.5 py-1.5 flex items-center justify-between gap-2 text-xs">
+                        {editingNewTaskIdx === idx ? (
+                          <div className="flex-1 flex items-center gap-1.5">
+                            <input
+                              type="text"
+                              value={editingNewTaskValue}
+                              onChange={(e) => setEditingNewTaskValue(e.target.value)}
+                              onKeyDown={(e) => {
+                                if (e.key === 'Enter') {
+                                  e.preventDefault();
+                                  handleSaveDraftTaskEdit(idx);
+                                }
+                              }}
+                              className={inputClass}
+                            />
+                            <button
+                              type="button"
+                              onClick={() => handleSaveDraftTaskEdit(idx)}
+                              className="px-2 py-1 bg-[#A83CE2] text-white rounded text-[11px] font-semibold cursor-pointer"
+                            >
+                              OK
+                            </button>
+                            <button
+                              type="button"
+                              onClick={() => setEditingNewTaskIdx(null)}
+                              className="px-1.5 py-1 text-slate-500 text-[11px] cursor-pointer"
+                            >
+                              Annuler
+                            </button>
+                          </div>
+                        ) : (
+                          <>
+                            <span className="text-slate-900 dark:text-white truncate">{tName}</span>
+                            <div className="flex items-center gap-1 shrink-0">
+                              <button
+                                type="button"
+                                onClick={() => {
+                                  setEditingNewTaskIdx(idx);
+                                  setEditingNewTaskValue(tName);
+                                }}
+                                className="px-1.5 py-0.5 text-[11px] font-semibold text-[#7624A8] dark:text-[#D896FF] cursor-pointer"
+                              >
+                                Modifier
+                              </button>
+                              <button
+                                type="button"
+                                onClick={() =>
+                                  setNewTasks((prev) => prev.filter((_, i) => i !== idx))
+                                }
+                                className="p-1 text-slate-400 hover:text-red-600 cursor-pointer"
+                                aria-label={`Retirer ${tName}`}
+                              >
+                                <Trash2 className="w-3 h-3" aria-hidden="true" />
+                              </button>
+                            </div>
+                          </>
+                        )}
+                      </div>
+                    ))}
+                  </div>
+                )}
+              </div>
+            </div>
 
             <div className="space-y-2 pt-2 border-t border-slate-200 dark:border-[#393342]">
               <div className="text-xs font-semibold text-slate-800 dark:text-white">

@@ -25,9 +25,11 @@ import {
   PlanningManualRow,
   PlanningWeekData,
   ProductionObjective,
+  ProjectCompanyItem,
   ProjectFormField,
   ProjectFormVersion,
   ProjectRecord,
+  ProjectTaskItem,
   QualityControlRecord,
   QualityCriterionConfig,
   QualityCriterionResult,
@@ -2769,7 +2771,13 @@ export const storageService = {
 
   getProjects(): ProjectRecord[] {
     const existing = safeReadJson<ProjectRecord[]>(STORAGE_KEYS.PROJECTS);
-    if (existing && Array.isArray(existing)) return existing;
+    if (existing && Array.isArray(existing)) {
+      return existing.map((p) => ({
+        ...p,
+        companies: Array.isArray(p.companies) ? p.companies : [],
+        tasks: Array.isArray(p.tasks) ? p.tasks : [],
+      }));
+    }
     safeWriteJson(STORAGE_KEYS.PROJECTS, []);
     return [];
   },
@@ -2927,6 +2935,35 @@ export const storageService = {
     );
   },
 
+  _normalizeProjectCatalogItems<T extends { id: string; name: string; createdAt?: string; updatedAt?: string }>(
+    rawItems: Array<string | { name: string }> | undefined,
+    idPrefix: string,
+    duplicateMessage: string
+  ): { items: T[]; error?: string } {
+    if (!rawItems || rawItems.length === 0) {
+      return { items: [] };
+    }
+    const nowIso = clockService.nowIso();
+    const seen = new Set<string>();
+    const items: T[] = [];
+    for (const raw of rawItems) {
+      const cleanName = (typeof raw === 'string' ? raw : raw.name).trim();
+      if (!cleanName) continue;
+      const lower = cleanName.toLowerCase();
+      if (seen.has(lower)) {
+        return { items: [], error: `${duplicateMessage} (« ${cleanName} »)` };
+      }
+      seen.add(lower);
+      items.push({
+        id: generateUniqueId(idPrefix),
+        name: cleanName,
+        createdAt: nowIso,
+        updatedAt: nowIso,
+      } as T);
+    }
+    return { items };
+  },
+
   createProject(
     input: {
       name: string;
@@ -2936,6 +2973,8 @@ export const storageService = {
       fields?: ProjectFormField[];
       assignedTeamIds?: string[];
       addedEmployeeIds?: string[];
+      companies?: Array<string | { name: string }>;
+      tasks?: Array<string | { name: string }>;
     },
     actor: AppUser
   ): { projects: ProjectRecord[]; created?: ProjectRecord; error?: string } {
@@ -2961,6 +3000,24 @@ export const storageService = {
       `PRJ-${String(current.length + 1).padStart(3, '0')}`;
     if (current.some((p) => p.code.trim().toLowerCase() === autoCode.toLowerCase())) {
       return { projects: current, error: 'Ce code projet est déjà utilisé.' };
+    }
+
+    const compNorm = this._normalizeProjectCatalogItems<ProjectCompanyItem>(
+      input.companies,
+      'pcomp',
+      'Deux sociétés portent le même nom dans ce projet'
+    );
+    if (compNorm.error) {
+      return { projects: current, error: compNorm.error };
+    }
+
+    const taskNorm = this._normalizeProjectCatalogItems<ProjectTaskItem>(
+      input.tasks,
+      'ptask',
+      'Deux tâches portent le même nom dans ce projet'
+    );
+    if (taskNorm.error) {
+      return { projects: current, error: taskNorm.error };
     }
 
     let sourceTemplate: FormTemplate | undefined;
@@ -3006,6 +3063,8 @@ export const storageService = {
       assignedTeamIds: Array.from(new Set(input.assignedTeamIds ?? [])),
       addedEmployeeIds: Array.from(new Set(input.addedEmployeeIds ?? [])),
       excludedEmployeeIds: [],
+      companies: compNorm.items,
+      tasks: taskNorm.items,
       currentFormVersionId: v1Id,
       currentFormVersionNumber: 1,
       formVersions: [v1],
@@ -3018,6 +3077,288 @@ export const storageService = {
     safeWriteJson(STORAGE_KEYS.PROJECTS, next);
     this.appendAuditLog(actor, 'Projet créé', '—', `${cleanName} (${autoCode})`);
     return { projects: next, created };
+  },
+
+  addProjectCompany(
+    projectId: string,
+    name: string,
+    actor: AppUser
+  ): { projects: ProjectRecord[]; updated?: ProjectRecord; error?: string } {
+    const current = this.getProjects();
+    if (
+      !this.canUserManageProjects(actor) ||
+      !this.getProjectsForUser(actor).some((p) => p.id === projectId)
+    ) {
+      return {
+        projects: current,
+        error: 'Seuls l’administrateur et les managers peuvent gérer les sociétés d’un projet.',
+      };
+    }
+    const existing = current.find((p) => p.id === projectId);
+    if (!existing) {
+      return { projects: current, error: 'Projet introuvable.' };
+    }
+    const cleanName = name.trim();
+    if (!cleanName) {
+      return { projects: current, error: 'Le nom de la société est obligatoire.' };
+    }
+    const currentCompanies = existing.companies ?? [];
+    if (currentCompanies.some((c) => c.name.trim().toLowerCase() === cleanName.toLowerCase())) {
+      return { projects: current, error: 'Cette société existe déjà dans ce projet.' };
+    }
+    const nowIso = clockService.nowIso();
+    const item: ProjectCompanyItem = {
+      id: generateUniqueId('pcomp'),
+      name: cleanName,
+      createdAt: nowIso,
+      updatedAt: nowIso,
+    };
+    const updated: ProjectRecord = {
+      ...existing,
+      companies: [...currentCompanies, item],
+      updatedAt: nowIso,
+    };
+    const next = current.map((p) => (p.id === projectId ? updated : p));
+    safeWriteJson(STORAGE_KEYS.PROJECTS, next);
+    this.appendAuditLog(actor, `Société projet ajoutée · ${existing.name}`, '—', cleanName);
+    return { projects: next, updated };
+  },
+
+  updateProjectCompany(
+    projectId: string,
+    companyId: string,
+    name: string,
+    actor: AppUser
+  ): { projects: ProjectRecord[]; updated?: ProjectRecord; error?: string } {
+    const current = this.getProjects();
+    if (
+      !this.canUserManageProjects(actor) ||
+      !this.getProjectsForUser(actor).some((p) => p.id === projectId)
+    ) {
+      return {
+        projects: current,
+        error: 'Seuls l’administrateur et les managers peuvent gérer les sociétés d’un projet.',
+      };
+    }
+    const existing = current.find((p) => p.id === projectId);
+    if (!existing) {
+      return { projects: current, error: 'Projet introuvable.' };
+    }
+    const cleanName = name.trim();
+    if (!cleanName) {
+      return { projects: current, error: 'Le nom de la société est obligatoire.' };
+    }
+    const currentCompanies = existing.companies ?? [];
+    const target = currentCompanies.find((c) => c.id === companyId);
+    if (!target) {
+      return { projects: current, error: 'Société introuvable dans ce projet.' };
+    }
+    if (
+      currentCompanies.some(
+        (c) => c.id !== companyId && c.name.trim().toLowerCase() === cleanName.toLowerCase()
+      )
+    ) {
+      return { projects: current, error: 'Une autre société porte déjà ce nom dans ce projet.' };
+    }
+    const nowIso = clockService.nowIso();
+    const updated: ProjectRecord = {
+      ...existing,
+      companies: currentCompanies.map((c) =>
+        c.id === companyId ? { ...c, name: cleanName, updatedAt: nowIso } : c
+      ),
+      updatedAt: nowIso,
+    };
+    const next = current.map((p) => (p.id === projectId ? updated : p));
+    safeWriteJson(STORAGE_KEYS.PROJECTS, next);
+    this.appendAuditLog(
+      actor,
+      `Société projet modifiée · ${existing.name}`,
+      target.name,
+      cleanName
+    );
+    return { projects: next, updated };
+  },
+
+  removeProjectCompany(
+    projectId: string,
+    companyId: string,
+    actor: AppUser
+  ): { projects: ProjectRecord[]; updated?: ProjectRecord; error?: string } {
+    const current = this.getProjects();
+    if (
+      !this.canUserManageProjects(actor) ||
+      !this.getProjectsForUser(actor).some((p) => p.id === projectId)
+    ) {
+      return {
+        projects: current,
+        error: 'Seuls l’administrateur et les managers peuvent gérer les sociétés d’un projet.',
+      };
+    }
+    const existing = current.find((p) => p.id === projectId);
+    if (!existing) {
+      return { projects: current, error: 'Projet introuvable.' };
+    }
+    const currentCompanies = existing.companies ?? [];
+    const target = currentCompanies.find((c) => c.id === companyId);
+    if (!target) {
+      return { projects: current, error: 'Société introuvable dans ce projet.' };
+    }
+    const nowIso = clockService.nowIso();
+    const updated: ProjectRecord = {
+      ...existing,
+      companies: currentCompanies.filter((c) => c.id !== companyId),
+      updatedAt: nowIso,
+    };
+    const next = current.map((p) => (p.id === projectId ? updated : p));
+    safeWriteJson(STORAGE_KEYS.PROJECTS, next);
+    this.appendAuditLog(
+      actor,
+      `Société projet retirée · ${existing.name}`,
+      target.name,
+      'Retirée (historique conservé)'
+    );
+    return { projects: next, updated };
+  },
+
+  addProjectTask(
+    projectId: string,
+    name: string,
+    actor: AppUser
+  ): { projects: ProjectRecord[]; updated?: ProjectRecord; error?: string } {
+    const current = this.getProjects();
+    if (
+      !this.canUserManageProjects(actor) ||
+      !this.getProjectsForUser(actor).some((p) => p.id === projectId)
+    ) {
+      return {
+        projects: current,
+        error: 'Seuls l’administrateur et les managers peuvent gérer les tâches d’un projet.',
+      };
+    }
+    const existing = current.find((p) => p.id === projectId);
+    if (!existing) {
+      return { projects: current, error: 'Projet introuvable.' };
+    }
+    const cleanName = name.trim();
+    if (!cleanName) {
+      return { projects: current, error: 'Le nom de la tâche est obligatoire.' };
+    }
+    const currentTasks = existing.tasks ?? [];
+    if (currentTasks.some((t) => t.name.trim().toLowerCase() === cleanName.toLowerCase())) {
+      return { projects: current, error: 'Cette tâche existe déjà dans ce projet.' };
+    }
+    const nowIso = clockService.nowIso();
+    const item: ProjectTaskItem = {
+      id: generateUniqueId('ptask'),
+      name: cleanName,
+      createdAt: nowIso,
+      updatedAt: nowIso,
+    };
+    const updated: ProjectRecord = {
+      ...existing,
+      tasks: [...currentTasks, item],
+      updatedAt: nowIso,
+    };
+    const next = current.map((p) => (p.id === projectId ? updated : p));
+    safeWriteJson(STORAGE_KEYS.PROJECTS, next);
+    this.appendAuditLog(actor, `Tâche projet ajoutée · ${existing.name}`, '—', cleanName);
+    return { projects: next, updated };
+  },
+
+  updateProjectTask(
+    projectId: string,
+    taskId: string,
+    name: string,
+    actor: AppUser
+  ): { projects: ProjectRecord[]; updated?: ProjectRecord; error?: string } {
+    const current = this.getProjects();
+    if (
+      !this.canUserManageProjects(actor) ||
+      !this.getProjectsForUser(actor).some((p) => p.id === projectId)
+    ) {
+      return {
+        projects: current,
+        error: 'Seuls l’administrateur et les managers peuvent gérer les tâches d’un projet.',
+      };
+    }
+    const existing = current.find((p) => p.id === projectId);
+    if (!existing) {
+      return { projects: current, error: 'Projet introuvable.' };
+    }
+    const cleanName = name.trim();
+    if (!cleanName) {
+      return { projects: current, error: 'Le nom de la tâche est obligatoire.' };
+    }
+    const currentTasks = existing.tasks ?? [];
+    const target = currentTasks.find((t) => t.id === taskId);
+    if (!target) {
+      return { projects: current, error: 'Tâche introuvable dans ce projet.' };
+    }
+    if (
+      currentTasks.some(
+        (t) => t.id !== taskId && t.name.trim().toLowerCase() === cleanName.toLowerCase()
+      )
+    ) {
+      return { projects: current, error: 'Une autre tâche porte déjà ce nom dans ce projet.' };
+    }
+    const nowIso = clockService.nowIso();
+    const updated: ProjectRecord = {
+      ...existing,
+      tasks: currentTasks.map((t) =>
+        t.id === taskId ? { ...t, name: cleanName, updatedAt: nowIso } : t
+      ),
+      updatedAt: nowIso,
+    };
+    const next = current.map((p) => (p.id === projectId ? updated : p));
+    safeWriteJson(STORAGE_KEYS.PROJECTS, next);
+    this.appendAuditLog(
+      actor,
+      `Tâche projet modifiée · ${existing.name}`,
+      target.name,
+      cleanName
+    );
+    return { projects: next, updated };
+  },
+
+  removeProjectTask(
+    projectId: string,
+    taskId: string,
+    actor: AppUser
+  ): { projects: ProjectRecord[]; updated?: ProjectRecord; error?: string } {
+    const current = this.getProjects();
+    if (
+      !this.canUserManageProjects(actor) ||
+      !this.getProjectsForUser(actor).some((p) => p.id === projectId)
+    ) {
+      return {
+        projects: current,
+        error: 'Seuls l’administrateur et les managers peuvent gérer les tâches d’un projet.',
+      };
+    }
+    const existing = current.find((p) => p.id === projectId);
+    if (!existing) {
+      return { projects: current, error: 'Projet introuvable.' };
+    }
+    const currentTasks = existing.tasks ?? [];
+    const target = currentTasks.find((t) => t.id === taskId);
+    if (!target) {
+      return { projects: current, error: 'Tâche introuvable dans ce projet.' };
+    }
+    const nowIso = clockService.nowIso();
+    const updated: ProjectRecord = {
+      ...existing,
+      tasks: currentTasks.filter((t) => t.id !== taskId),
+      updatedAt: nowIso,
+    };
+    const next = current.map((p) => (p.id === projectId ? updated : p));
+    safeWriteJson(STORAGE_KEYS.PROJECTS, next);
+    this.appendAuditLog(
+      actor,
+      `Tâche projet retirée · ${existing.name}`,
+      target.name,
+      'Retirée (historique conservé)'
+    );
+    return { projects: next, updated };
   },
 
   updateProjectInfo(
@@ -3457,8 +3798,15 @@ export const storageService = {
           false
         )
       : [];
+    const companiesSnapshot = (candidate.companies ?? []).map((c) => ({ ...c }));
+    const tasksSnapshot = (candidate.tasks ?? []).map((t) => ({ ...t }));
 
-    if (!formVersion || activeFields.length === 0) {
+    if (
+      !formVersion ||
+      (activeFields.length === 0 &&
+        companiesSnapshot.length === 0 &&
+        tasksSnapshot.length === 0)
+    ) {
       return {
         shiftState: current,
         error:
@@ -3479,6 +3827,8 @@ export const storageService = {
       formVersionId: formVersion.id,
       formVersionNumber: formVersion.versionNumber,
       formFieldsSnapshot: activeFields,
+      projectCompaniesSnapshot: companiesSnapshot,
+      projectTasksSnapshot: tasksSnapshot,
       customResponses: {},
       taskId: '',
       taskTitle: '',
@@ -3667,15 +4017,37 @@ export const storageService = {
 
     const errors: string[] = [];
 
+    let matchedProjectCompany: ProjectCompanyItem | undefined;
+    let matchedProjectTask: ProjectTaskItem | undefined;
+
     if (active.type === 'traitement') {
       const orderedFields = (active.formFieldsSnapshot ?? [])
         .filter((f) => f.active)
         .slice()
         .sort((a, b) => a.order - b.order);
+      const projectCompanies = active.projectCompaniesSnapshot ?? [];
+      const projectTasks = active.projectTasksSnapshot ?? [];
 
-      if (orderedFields.length === 0) {
+      if (
+        orderedFields.length === 0 &&
+        projectCompanies.length === 0 &&
+        projectTasks.length === 0
+      ) {
         errors.push('Aucun formulaire publié actif n’est associé à ce traitement.');
       } else {
+        if (projectCompanies.length > 0) {
+          matchedProjectCompany = projectCompanies.find((c) => c.id === active.companyId);
+          if (!matchedProjectCompany) {
+            errors.push('Le champ « Société » est obligatoire.');
+          }
+        }
+        if (projectTasks.length > 0) {
+          matchedProjectTask = projectTasks.find((t) => t.id === active.taskId);
+          if (!matchedProjectTask) {
+            errors.push('Le champ « Tâche » est obligatoire.');
+          }
+        }
+
         const responses = active.customResponses ?? {};
         for (const field of orderedFields) {
           const rawVal = responses[field.id];
@@ -3746,11 +4118,18 @@ export const storageService = {
 
     const isDynamicTreatment = active.type === 'traitement';
 
+    const finalTaskId = isDynamicTreatment ? matchedProjectTask?.id ?? '' : active.taskId;
     const finalTaskTitle = isDynamicTreatment
-      ? ''
+      ? matchedProjectTask?.name ?? ''
       : active.type === 'sortie' && active.outingReason === 'autre' && active.customReason?.trim()
       ? `Autre : ${active.customReason.trim()}`
       : active.taskTitle.trim();
+    const finalCompanyId = isDynamicTreatment
+      ? matchedProjectCompany?.id ?? ''
+      : active.companyId;
+    const finalClientName = isDynamicTreatment
+      ? matchedProjectCompany?.name ?? ''
+      : active.clientName.trim() || 'Interne';
 
     const allowedFieldIds = new Set(
       (active.formFieldsSnapshot ?? []).filter((f) => f.active).map((f) => f.id)
@@ -3781,10 +4160,10 @@ export const storageService = {
         ? this._cloneFormFields(active.formFieldsSnapshot, false)
         : undefined,
       customResponses: cleanedResponses,
-      taskId: isDynamicTreatment ? '' : active.taskId,
+      taskId: finalTaskId,
       taskTitle: finalTaskTitle,
-      companyId: isDynamicTreatment ? '' : active.companyId,
-      clientName: isDynamicTreatment ? '' : active.clientName.trim() || 'Interne',
+      companyId: finalCompanyId,
+      clientName: finalClientName,
       dossierRef: isDynamicTreatment
         ? ''
         : active.dossierRef?.trim() ||

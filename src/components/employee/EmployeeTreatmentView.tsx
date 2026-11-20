@@ -19,6 +19,10 @@ interface EmployeeTreatmentViewProps {
   lastSavedActivity: ActivityRecord | null;
   onStartTreatment: (projectId?: string) => string | null;
   onUpdateTimerFields: (patch: {
+    companyId?: string;
+    clientName?: string;
+    taskId?: string;
+    taskTitle?: string;
     customResponses?: Record<string, CustomFieldValue>;
   }) => void;
   onCompleteTimer: () => string[] | null;
@@ -83,9 +87,14 @@ export function EmployeeTreatmentView({
 
   const noProjectsConfigured = allProjectsCount === 0;
   const noAssignedProjectBlocked = allProjectsCount > 0 && projects.length === 0;
+  const previewCompaniesCount = effectiveSelectedProject?.companies?.length ?? 0;
+  const previewTasksCount = effectiveSelectedProject?.tasks?.length ?? 0;
   const hasNoPublishedForm =
     Boolean(effectiveSelectedProject) &&
-    (!previewFormVersion || previewActiveFields.length === 0);
+    (!previewFormVersion ||
+      (previewActiveFields.length === 0 &&
+        previewCompaniesCount === 0 &&
+        previewTasksCount === 0));
 
   const canStartTreatment =
     !isOtherActivityActive &&
@@ -130,6 +139,12 @@ export function EmployeeTreatmentView({
     'w-full px-3 py-2 text-sm bg-white dark:bg-[#211E27] text-slate-900 dark:text-white border border-slate-300 dark:border-[#393342] rounded-lg focus:outline-none focus:border-[#A83CE2] placeholder:text-slate-400 dark:placeholder:text-[#C8C2D0]/50 disabled:opacity-60 disabled:cursor-not-allowed';
 
   const displayedFields = isTreatmentActive ? activeCustomFields : previewActiveFields;
+  const displayedCompanies = isTreatmentActive
+    ? activeTimer?.projectCompaniesSnapshot ?? []
+    : effectiveSelectedProject?.companies ?? [];
+  const displayedTasks = isTreatmentActive
+    ? activeTimer?.projectTasksSnapshot ?? []
+    : effectiveSelectedProject?.tasks ?? [];
   const displayedProjectName = isTreatmentActive
     ? activeTimer?.projectName ?? ''
     : effectiveSelectedProject?.name ?? '';
@@ -233,7 +248,8 @@ export function EmployeeTreatmentView({
                       Formulaire du projet : {effectiveSelectedProject.name}
                     </span>
                     <span className="font-mono font-semibold text-[#7624A8] dark:text-[#D896FF]">
-                      v{displayedFormVersionNumber} · {previewActiveFields.length} champ(s)
+                      v{displayedFormVersionNumber} · {previewCompaniesCount} soc. ·{' '}
+                      {previewTasksCount} tâche(s) · {previewActiveFields.length} champ(s)
                     </span>
                   </div>
                   {hasNoPublishedForm ? (
@@ -340,14 +356,16 @@ export function EmployeeTreatmentView({
         {/* Formulaire dynamique exclusivement lié au projet sélectionné */}
         {(isTreatmentActive || effectiveSelectedProject) && (
           <div className="space-y-4">
-            {displayedFields.length === 0 ? (
+            {displayedFields.length === 0 &&
+            displayedCompanies.length === 0 &&
+            displayedTasks.length === 0 ? (
               <div className="bg-amber-50 dark:bg-amber-950/40 border border-amber-200 dark:border-amber-800/60 rounded-lg p-4 text-xs text-amber-900 dark:text-amber-200 flex items-start gap-2.5">
                 <AlertCircle
                   className="w-4 h-4 text-amber-700 dark:text-amber-400 shrink-0 mt-0.5"
                   aria-hidden="true"
                 />
                 <span>
-                  Ce projet ne possède pas encore de formulaire publié actif. Veuillez contacter votre manager ou administrateur pour publier ses champs avant d’effectuer un traitement.
+                  Ce projet ne possède pas encore de formulaire publié actif. Veuillez contacter votre manager ou administrateur pour configurer ses sociétés, tâches ou champs avant d’effectuer un traitement.
                 </span>
               </div>
             ) : (
@@ -357,12 +375,97 @@ export function EmployeeTreatmentView({
                     Formulaire du projet — {displayedProjectName} (v{displayedFormVersionNumber})
                   </h3>
                   <span className="text-xs text-slate-500 dark:text-[#C8C2D0]">
+                    {displayedCompanies.length} société(s) · {displayedTasks.length} tâche(s) ·{' '}
                     {displayedFields.length} champ(s){' '}
                     {!isTreatmentActive ? '· Aperçu avant démarrage' : ''}
                   </span>
                 </div>
 
                 <div className="grid grid-cols-1 md:grid-cols-2 gap-4">
+                  {/* Champ Société propre au projet */}
+                  <div>
+                    <label
+                      htmlFor="trt-project-company"
+                      className="block text-xs font-medium text-slate-700 dark:text-[#C8C2D0] mb-1.5"
+                    >
+                      Société{' '}
+                      {displayedCompanies.length > 0 && (
+                        <span className="text-red-600 dark:text-red-400">*</span>
+                      )}
+                    </label>
+                    <select
+                      id="trt-project-company"
+                      disabled={!isTreatmentActive || displayedCompanies.length === 0}
+                      value={isTreatmentActive ? activeTimer?.companyId ?? '' : ''}
+                      onChange={(e) => {
+                        const comp = displayedCompanies.find((c) => c.id === e.target.value);
+                        onUpdateTimerFields({
+                          companyId: comp?.id ?? '',
+                          clientName: comp?.name ?? '',
+                        });
+                      }}
+                      className={inputClass}
+                    >
+                      <option value="">
+                        {displayedCompanies.length === 0
+                          ? 'Aucune société configurée pour ce projet'
+                          : 'Sélectionner une société...'}
+                      </option>
+                      {displayedCompanies.map((c) => (
+                        <option key={c.id} value={c.id}>
+                          {c.name}
+                        </option>
+                      ))}
+                    </select>
+                    {displayedCompanies.length === 0 && (
+                      <p className="text-[11px] text-amber-700 dark:text-amber-300 mt-1">
+                        Aucune société n’est rattachée à ce projet.
+                      </p>
+                    )}
+                  </div>
+
+                  {/* Champ Tâche propre au projet */}
+                  <div>
+                    <label
+                      htmlFor="trt-project-task"
+                      className="block text-xs font-medium text-slate-700 dark:text-[#C8C2D0] mb-1.5"
+                    >
+                      Tâche{' '}
+                      {displayedTasks.length > 0 && (
+                        <span className="text-red-600 dark:text-red-400">*</span>
+                      )}
+                    </label>
+                    <select
+                      id="trt-project-task"
+                      disabled={!isTreatmentActive || displayedTasks.length === 0}
+                      value={isTreatmentActive ? activeTimer?.taskId ?? '' : ''}
+                      onChange={(e) => {
+                        const t = displayedTasks.find((item) => item.id === e.target.value);
+                        onUpdateTimerFields({
+                          taskId: t?.id ?? '',
+                          taskTitle: t?.name ?? '',
+                        });
+                      }}
+                      className={inputClass}
+                    >
+                      <option value="">
+                        {displayedTasks.length === 0
+                          ? 'Aucune tâche configurée pour ce projet'
+                          : 'Sélectionner une tâche...'}
+                      </option>
+                      {displayedTasks.map((t) => (
+                        <option key={t.id} value={t.id}>
+                          {t.name}
+                        </option>
+                      ))}
+                    </select>
+                    {displayedTasks.length === 0 && (
+                      <p className="text-[11px] text-amber-700 dark:text-amber-300 mt-1">
+                        Aucune tâche n’est rattachée à ce projet.
+                      </p>
+                    )}
+                  </div>
+
                   {displayedFields.map((field) => {
                     const rawVal = isTreatmentActive
                       ? activeTimer?.customResponses?.[field.id]
@@ -575,17 +678,19 @@ export function EmployeeTreatmentView({
             <CheckCircle2 className="w-4 h-4 text-[#A83CE2] shrink-0" aria-hidden="true" />
             <span>
               Enregistré :{' '}
-              {lastSavedActivity.projectName ? (
-                <strong>
-                  {lastSavedActivity.projectName} (v{lastSavedActivity.formVersionNumber ?? 1})
-                </strong>
-              ) : (
-                <strong>
-                  {[lastSavedActivity.clientName, lastSavedActivity.taskTitle]
-                    .filter(Boolean)
-                    .join(' · ')}
-                </strong>
-              )}{' '}
+              <strong>
+                {[
+                  lastSavedActivity.projectName
+                    ? `${lastSavedActivity.projectName} (v${
+                        lastSavedActivity.formVersionNumber ?? 1
+                      })`
+                    : '',
+                  lastSavedActivity.clientName,
+                  lastSavedActivity.taskTitle,
+                ]
+                  .filter(Boolean)
+                  .join(' · ')}
+              </strong>{' '}
               {lastSavedActivity.dossierRef ? `(${lastSavedActivity.dossierRef}) ` : ''}—{' '}
               {formatDurationHMS(lastSavedActivity.durationSeconds)}
             </span>

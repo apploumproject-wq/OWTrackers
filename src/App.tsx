@@ -56,7 +56,6 @@ import { EmployeeStatsView } from './components/employee/EmployeeStatsView';
 import { ProfileView } from './components/profile/ProfileView';
 import { ManagementDashboard } from './components/management/ManagementDashboard';
 import { EmployeesTeamsView } from './components/management/EmployeesTeamsView';
-import { CompaniesTasksView } from './components/management/CompaniesTasksView';
 import { ProjectsManagementView } from './components/management/ProjectsManagementView';
 import { SchedulesOutingsView } from './components/management/SchedulesOutingsView';
 import { QualityControlView } from './components/management/QualityControlView';
@@ -95,9 +94,6 @@ export default function App() {
     storageService.getCompanies()
   );
   const [tasks, setTasks] = useState<TaskRecord[]>(() => storageService.getTasks());
-  const [companyTaskMap, setCompanyTaskMap] = useState<Record<string, string[]>>(() =>
-    storageService.getCompanyTaskMap()
-  );
   const [allProjects, setAllProjects] = useState<ProjectRecord[]>(() =>
     storageService.getProjects()
   );
@@ -172,7 +168,6 @@ export default function App() {
     setOutingRequests(storageService.getOutingRequests());
     setCompanies(storageService.getCompanies());
     setTasks(storageService.getTasks());
-    setCompanyTaskMap(storageService.getCompanyTaskMap());
     setAllProjects(storageService.getProjects());
     setFormTemplates(storageService.getFormTemplates());
     setTreatmentActivities(storageService.getAllTreatmentActivities());
@@ -496,54 +491,6 @@ export default function App() {
     setAuditLogs(storageService.getAuditLogs());
   };
 
-  const handleAddCompany = (name: string) => {
-    if (!currentUser) return;
-    setCompanies(storageService.addCompany(name, currentUser));
-    setCompanyTaskMap(storageService.getCompanyTaskMap());
-    setAuditLogs(storageService.getAuditLogs());
-  };
-
-  const handleRenameCompany = (id: string, name: string) => {
-    if (!currentUser) return;
-    setCompanies(storageService.renameCompany(id, name, currentUser));
-    setAuditLogs(storageService.getAuditLogs());
-  };
-
-  const handleToggleArchiveCompany = (id: string, archived: boolean) => {
-    if (!currentUser) return;
-    setCompanies(storageService.toggleArchiveCompany(id, archived, currentUser));
-    setAuditLogs(storageService.getAuditLogs());
-  };
-
-  const handleAddTask = (name: string) => {
-    if (!currentUser) return;
-    setTasks(storageService.addTask(name, currentUser));
-    setCompanyTaskMap(storageService.getCompanyTaskMap());
-    setAuditLogs(storageService.getAuditLogs());
-  };
-
-  const handleRenameTask = (id: string, name: string) => {
-    if (!currentUser) return;
-    setTasks(storageService.renameTask(id, name, currentUser));
-    setAuditLogs(storageService.getAuditLogs());
-  };
-
-  const handleToggleArchiveTask = (id: string, archived: boolean) => {
-    if (!currentUser) return;
-    setTasks(storageService.toggleArchiveTask(id, archived, currentUser));
-    setAuditLogs(storageService.getAuditLogs());
-  };
-
-  const handleToggleTaskForCompany = (
-    companyId: string,
-    taskId: string,
-    enabled: boolean
-  ) => {
-    if (!currentUser) return;
-    setCompanyTaskMap(storageService.toggleTaskForCompany(companyId, taskId, enabled, currentUser));
-    setAuditLogs(storageService.getAuditLogs());
-  };
-
   const handleEvaluateQc = (
     qcId: string,
     payload: {
@@ -636,12 +583,73 @@ export default function App() {
     fields?: ProjectFormField[];
     assignedTeamIds?: string[];
     addedEmployeeIds?: string[];
+    companies?: string[];
+    tasks?: string[];
   }): { created?: ProjectRecord; error?: string } => {
     if (!currentUser) return { error: 'Session expirée.' };
     const res = storageService.createProject(input, currentUser);
     setAllProjects(res.projects);
     setAuditLogs(storageService.getAuditLogs());
     return { created: res.created, error: res.error };
+  };
+
+  const handleAddProjectCompany = (projectId: string, name: string): { error?: string } => {
+    if (!currentUser) return { error: 'Session expirée.' };
+    const res = storageService.addProjectCompany(projectId, name, currentUser);
+    setAllProjects(res.projects);
+    setAuditLogs(storageService.getAuditLogs());
+    return res.error ? { error: res.error } : {};
+  };
+
+  const handleUpdateProjectCompany = (
+    projectId: string,
+    companyId: string,
+    name: string
+  ): { error?: string } => {
+    if (!currentUser) return { error: 'Session expirée.' };
+    const res = storageService.updateProjectCompany(projectId, companyId, name, currentUser);
+    setAllProjects(res.projects);
+    setAuditLogs(storageService.getAuditLogs());
+    return res.error ? { error: res.error } : {};
+  };
+
+  const handleRemoveProjectCompany = (
+    projectId: string,
+    companyId: string
+  ): { error?: string } => {
+    if (!currentUser) return { error: 'Session expirée.' };
+    const res = storageService.removeProjectCompany(projectId, companyId, currentUser);
+    setAllProjects(res.projects);
+    setAuditLogs(storageService.getAuditLogs());
+    return res.error ? { error: res.error } : {};
+  };
+
+  const handleAddProjectTask = (projectId: string, name: string): { error?: string } => {
+    if (!currentUser) return { error: 'Session expirée.' };
+    const res = storageService.addProjectTask(projectId, name, currentUser);
+    setAllProjects(res.projects);
+    setAuditLogs(storageService.getAuditLogs());
+    return res.error ? { error: res.error } : {};
+  };
+
+  const handleUpdateProjectTask = (
+    projectId: string,
+    taskId: string,
+    name: string
+  ): { error?: string } => {
+    if (!currentUser) return { error: 'Session expirée.' };
+    const res = storageService.updateProjectTask(projectId, taskId, name, currentUser);
+    setAllProjects(res.projects);
+    setAuditLogs(storageService.getAuditLogs());
+    return res.error ? { error: res.error } : {};
+  };
+
+  const handleRemoveProjectTask = (projectId: string, taskId: string): { error?: string } => {
+    if (!currentUser) return { error: 'Session expirée.' };
+    const res = storageService.removeProjectTask(projectId, taskId, currentUser);
+    setAllProjects(res.projects);
+    setAuditLogs(storageService.getAuditLogs());
+    return res.error ? { error: res.error } : {};
   };
 
   const handleUpdateProjectInfo = (
@@ -853,6 +861,7 @@ export default function App() {
               user={currentUser}
               activities={activities}
               correctionRequests={userCorrectionRequests}
+              projects={allProjects}
               onCreateCorrectionRequest={handleCreateCorrectionRequest}
             />
           )}
@@ -906,20 +915,6 @@ export default function App() {
               onReviewCorrectionRequest={handleReviewCorrectionRequest}
             />
           )}
-          {safeModule === 'mgmt_clients' && (
-            <CompaniesTasksView
-              companies={companies}
-              tasks={tasks}
-              companyTaskMap={companyTaskMap}
-              onAddCompany={handleAddCompany}
-              onRenameCompany={handleRenameCompany}
-              onToggleArchiveCompany={handleToggleArchiveCompany}
-              onAddTask={handleAddTask}
-              onRenameTask={handleRenameTask}
-              onToggleArchiveTask={handleToggleArchiveTask}
-              onToggleTaskForCompany={handleToggleTaskForCompany}
-            />
-          )}
           {safeModule === 'mgmt_projects' && (
             <ProjectsManagementView
               user={currentUser}
@@ -932,6 +927,12 @@ export default function App() {
               onToggleProjectActive={handleToggleProjectActive}
               onUpdateProjectAssignments={handleUpdateProjectAssignments}
               onToggleEmployeeProjectAssignment={handleToggleEmployeeProjectAssignment}
+              onAddProjectCompany={handleAddProjectCompany}
+              onUpdateProjectCompany={handleUpdateProjectCompany}
+              onRemoveProjectCompany={handleRemoveProjectCompany}
+              onAddProjectTask={handleAddProjectTask}
+              onUpdateProjectTask={handleUpdateProjectTask}
+              onRemoveProjectTask={handleRemoveProjectTask}
               onPublishProjectFormVersion={handlePublishProjectFormVersion}
               onCreateFormTemplate={handleCreateFormTemplate}
               onUpdateFormTemplate={handleUpdateFormTemplate}

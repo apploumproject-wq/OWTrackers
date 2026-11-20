@@ -31,6 +31,8 @@ export function EmployeeStatsView({
   livePauseSeconds,
 }: EmployeeStatsViewProps) {
   const [projectFilter, setProjectFilter] = useState<string>('all');
+  const [companyFilter, setCompanyFilter] = useState<string>('all');
+  const [taskFilter, setTaskFilter] = useState<string>('all');
 
   const projectOptions = useMemo(() => {
     const map = new Map<string, { id: string; name: string; active: boolean }>();
@@ -49,6 +51,76 @@ export function EmployeeStatsView({
     return Array.from(map.values());
   }, [projects, activities]);
 
+  const companyOptions = useMemo(() => {
+    const map = new Map<string, { id: string; label: string }>();
+    const scopedProjects =
+      projectFilter !== 'all' && projectFilter !== 'none'
+        ? projects.filter((p) => p.id === projectFilter)
+        : projectFilter === 'none'
+        ? []
+        : projects;
+    for (const p of scopedProjects) {
+      for (const c of p.companies ?? []) {
+        map.set(c.id, {
+          id: c.id,
+          label: projectFilter === 'all' ? `${c.name} (${p.name})` : c.name,
+        });
+      }
+    }
+    for (const a of activities) {
+      if (a.type !== 'traitement' || !a.companyId) continue;
+      if (projectFilter === 'none' && a.projectId) continue;
+      if (projectFilter !== 'all' && projectFilter !== 'none' && a.projectId !== projectFilter)
+        continue;
+      if (!map.has(a.companyId)) {
+        const baseName = a.clientName?.trim() || a.companyId;
+        map.set(a.companyId, {
+          id: a.companyId,
+          label:
+            projectFilter === 'all' && a.projectName
+              ? `${baseName} (${a.projectName})`
+              : baseName,
+        });
+      }
+    }
+    return Array.from(map.values());
+  }, [projects, activities, projectFilter]);
+
+  const taskOptions = useMemo(() => {
+    const map = new Map<string, { id: string; label: string }>();
+    const scopedProjects =
+      projectFilter !== 'all' && projectFilter !== 'none'
+        ? projects.filter((p) => p.id === projectFilter)
+        : projectFilter === 'none'
+        ? []
+        : projects;
+    for (const p of scopedProjects) {
+      for (const t of p.tasks ?? []) {
+        map.set(t.id, {
+          id: t.id,
+          label: projectFilter === 'all' ? `${t.name} (${p.name})` : t.name,
+        });
+      }
+    }
+    for (const a of activities) {
+      if (a.type !== 'traitement' || !a.taskId) continue;
+      if (projectFilter === 'none' && a.projectId) continue;
+      if (projectFilter !== 'all' && projectFilter !== 'none' && a.projectId !== projectFilter)
+        continue;
+      if (!map.has(a.taskId)) {
+        const baseName = a.taskTitle?.trim() || a.taskId;
+        map.set(a.taskId, {
+          id: a.taskId,
+          label:
+            projectFilter === 'all' && a.projectName
+              ? `${baseName} (${a.projectName})`
+              : baseName,
+        });
+      }
+    }
+    return Array.from(map.values());
+  }, [projects, activities, projectFilter]);
+
   const allTreatments = useMemo(
     () => activities.filter((a) => a.type === 'traitement'),
     [activities]
@@ -56,11 +128,14 @@ export function EmployeeStatsView({
 
   const treatments = useMemo(() => {
     return allTreatments.filter((a) => {
-      if (projectFilter === 'none') return !a.projectId;
-      if (projectFilter !== 'all') return a.projectId === projectFilter;
+      if (projectFilter === 'none' && a.projectId) return false;
+      if (projectFilter !== 'all' && projectFilter !== 'none' && a.projectId !== projectFilter)
+        return false;
+      if (companyFilter !== 'all' && a.companyId !== companyFilter) return false;
+      if (taskFilter !== 'all' && a.taskId !== taskFilter) return false;
       return true;
     });
-  }, [allTreatments, projectFilter]);
+  }, [allTreatments, projectFilter, companyFilter, taskFilter]);
 
   const history = useMemo(() => {
     const map: Record<
@@ -73,6 +148,8 @@ export function EmployeeStatsView({
         if (projectFilter !== 'all' && projectFilter !== 'none' && act.projectId !== projectFilter) {
           continue;
         }
+        if (companyFilter !== 'all' && act.companyId !== companyFilter) continue;
+        if (taskFilter !== 'all' && act.taskId !== taskFilter) continue;
       }
       const ymd = toYmd(new Date(act.startedAt));
       if (!map[ymd]) {
@@ -81,12 +158,17 @@ export function EmployeeStatsView({
       if (act.type === 'traitement') {
         map[ymd].productiveSeconds += act.durationSeconds;
         map[ymd].presenceSeconds += act.durationSeconds;
-      } else if (act.type === 'sortie' && projectFilter === 'all') {
+      } else if (
+        act.type === 'sortie' &&
+        projectFilter === 'all' &&
+        companyFilter === 'all' &&
+        taskFilter === 'all'
+      ) {
         map[ymd].presenceSeconds += act.durationSeconds;
       }
     }
     return Object.values(map).sort((a, b) => b.date.localeCompare(a.date)).slice(0, 7);
-  }, [activities, projectFilter]);
+  }, [activities, projectFilter, companyFilter, taskFilter]);
 
   const totalTreatmentSeconds = treatments.reduce((s, a) => s + a.durationSeconds, 0);
   const avgHandlingSeconds =
@@ -154,11 +236,14 @@ export function EmployeeStatsView({
   const myQc = useMemo(() => {
     return qualityControls.filter((q) => {
       if (q.employeeId !== user.id) return false;
-      if (projectFilter === 'none') return !q.projectId;
-      if (projectFilter !== 'all') return q.projectId === projectFilter;
+      if (projectFilter === 'none' && q.projectId) return false;
+      if (projectFilter !== 'all' && projectFilter !== 'none' && q.projectId !== projectFilter)
+        return false;
+      if (companyFilter !== 'all' && q.companyId !== companyFilter) return false;
+      if (taskFilter !== 'all' && q.taskId !== taskFilter) return false;
       return true;
     });
-  }, [qualityControls, user.id, projectFilter]);
+  }, [qualityControls, user.id, projectFilter, companyFilter, taskFilter]);
 
   const controlledQc = myQc.filter((q) => q.status !== 'en_attente');
   const compliantQc = controlledQc.filter(
@@ -188,21 +273,55 @@ export function EmployeeStatsView({
       <SectionHeader
         title="Mes statistiques"
         action={
-          projectOptions.length > 0 ? (
-            <select
-              aria-label="Filtrer par projet"
-              value={projectFilter}
-              onChange={(e) => setProjectFilter(e.target.value)}
-              className="px-3 py-2 text-xs border border-slate-300 dark:border-[#393342] rounded-lg bg-white dark:bg-[#292631] text-slate-900 dark:text-white focus:outline-none focus:border-[#A83CE2]"
-            >
-              <option value="all">Tous les projets</option>
-              <option value="none">Sans projet (historique)</option>
-              {projectOptions.map((p) => (
-                <option key={p.id} value={p.id}>
-                  {p.name} {!p.active ? '(désactivé)' : ''}
-                </option>
-              ))}
-            </select>
+          projectOptions.length > 0 || companyOptions.length > 0 || taskOptions.length > 0 ? (
+            <div className="flex flex-wrap items-center gap-2">
+              {projectOptions.length > 0 && (
+                <select
+                  aria-label="Filtrer par projet"
+                  value={projectFilter}
+                  onChange={(e) => {
+                    setProjectFilter(e.target.value);
+                    setCompanyFilter('all');
+                    setTaskFilter('all');
+                  }}
+                  className="px-3 py-2 text-xs border border-slate-300 dark:border-[#393342] rounded-lg bg-white dark:bg-[#292631] text-slate-900 dark:text-white focus:outline-none focus:border-[#A83CE2]"
+                >
+                  <option value="all">Tous les projets</option>
+                  <option value="none">Sans projet (historique)</option>
+                  {projectOptions.map((p) => (
+                    <option key={p.id} value={p.id}>
+                      {p.name} {!p.active ? '(désactivé)' : ''}
+                    </option>
+                  ))}
+                </select>
+              )}
+              <select
+                aria-label="Filtrer par société"
+                value={companyFilter}
+                onChange={(e) => setCompanyFilter(e.target.value)}
+                className="px-3 py-2 text-xs border border-slate-300 dark:border-[#393342] rounded-lg bg-white dark:bg-[#292631] text-slate-900 dark:text-white focus:outline-none focus:border-[#A83CE2]"
+              >
+                <option value="all">Toutes les sociétés</option>
+                {companyOptions.map((c) => (
+                  <option key={c.id} value={c.id}>
+                    {c.label}
+                  </option>
+                ))}
+              </select>
+              <select
+                aria-label="Filtrer par tâche"
+                value={taskFilter}
+                onChange={(e) => setTaskFilter(e.target.value)}
+                className="px-3 py-2 text-xs border border-slate-300 dark:border-[#393342] rounded-lg bg-white dark:bg-[#292631] text-slate-900 dark:text-white focus:outline-none focus:border-[#A83CE2]"
+              >
+                <option value="all">Toutes les tâches</option>
+                {taskOptions.map((t) => (
+                  <option key={t.id} value={t.id}>
+                    {t.label}
+                  </option>
+                ))}
+              </select>
+            </div>
           ) : undefined
         }
       />
@@ -212,7 +331,11 @@ export function EmployeeStatsView({
           label="Dossiers traités (historique)"
           value={treatments.length}
           subtext={
-            target !== null && objectivePct !== null && projectFilter === 'all'
+            target !== null &&
+            objectivePct !== null &&
+            projectFilter === 'all' &&
+            companyFilter === 'all' &&
+            taskFilter === 'all'
               ? `Objectif jour : ${objectivePct}% (${dossiersTodayCount}/${target})`
               : `Aujourd’hui : ${dossiersTodayCount} dossier(s)`
           }
