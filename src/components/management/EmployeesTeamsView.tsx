@@ -32,6 +32,7 @@ import { ROLE_LABELS } from '../../core/permissions';
 import {
   CreateUserInput,
   ExcelImportExecutionResult,
+  ExcelImportRowInput,
   storageService,
 } from '../../services/storageService';
 import { buildProvisionalPassword, isValidEmail } from '../../utils/crypto';
@@ -64,7 +65,7 @@ interface EmployeesTeamsViewProps {
     provisionalPassword?: string;
   }>;
   onImportEmployeesExcel: (
-    rows: Array<{ rowNumber: number; fullName: string; matricule: string }>
+    rows: ExcelImportRowInput[]
   ) => Promise<ExcelImportExecutionResult>;
   onUpdateAccount: (
     userId: string,
@@ -548,7 +549,11 @@ export function EmployeesTeamsView({
         return;
       }
       const buffer = await file.arrayBuffer();
-      const preview = analyzeEmployeeExcelBuffer(buffer, file.name, employees);
+      const preview = analyzeEmployeeExcelBuffer(buffer, file.name, employees, {
+        actorRole: user.role,
+        projects,
+        assignableProjectIds: activeAssignableProjects.map((p) => p.id),
+      });
       setExcelPreview(preview);
     } catch {
       setExcelPreview({
@@ -569,12 +574,16 @@ export function EmployeesTeamsView({
 
   const handleConfirmExcelImport = async () => {
     if (!excelPreview || excelPreview.validRows === 0) return;
-    const validRows = excelPreview.rows
-      .filter((r) => r.status === 'valid')
+    const validRows: ExcelImportRowInput[] = excelPreview.rows
+      .filter((r) => r.status === 'valid' && r.role)
       .map((r) => ({
         rowNumber: r.rowNumber,
         fullName: r.fullName,
         matricule: r.matricule,
+        rawRole: r.rawRole,
+        role: r.role,
+        rawProjects: r.rawProjects,
+        projectIds: r.projectIds,
       }));
     const ignoredFromPreview = excelPreview.rows
       .filter((r) => r.status !== 'valid')
@@ -2012,7 +2021,7 @@ export function EmployeesTeamsView({
             onClick={closeExcelModal}
             aria-hidden="true"
           />
-          <div className="relative bg-white dark:bg-[#292631] border border-slate-200 dark:border-[#393342] rounded-xl max-w-3xl w-full p-6 space-y-5 shadow-xl z-10 max-h-[90vh] overflow-y-auto">
+          <div className="relative bg-white dark:bg-[#292631] border border-slate-200 dark:border-[#393342] rounded-xl max-w-5xl w-full p-6 space-y-5 shadow-xl z-10 max-h-[90vh] overflow-y-auto">
             <div className="flex items-start justify-between border-b border-slate-200 dark:border-[#393342] pb-4 gap-4">
               <div>
                 <div className="inline-flex items-center gap-2 text-xs font-semibold text-[#7624A8] dark:text-[#D896FF]">
@@ -2024,7 +2033,7 @@ export function EmployeesTeamsView({
                     ? 'Bilan de l’importation'
                     : excelPreview && !excelPreview.error
                     ? 'Aperçu avant importation'
-                    : 'Importer des employés depuis Excel'}
+                    : 'Importer des utilisateurs depuis Excel'}
                 </h3>
               </div>
               <button
@@ -2041,14 +2050,31 @@ export function EmployeesTeamsView({
             {!excelResult && (
               <div className="space-y-4">
                 <div className="bg-slate-50 dark:bg-[#211E27] border border-slate-200 dark:border-[#393342] rounded-lg p-4 flex flex-col sm:flex-row sm:items-center sm:justify-between gap-4">
-                  <div className="space-y-1 text-xs">
+                  <div className="space-y-1.5 text-xs">
                     <div className="font-semibold text-slate-900 dark:text-white">
-                      Colonnes obligatoires : <span className="font-mono text-[#7624A8] dark:text-[#D896FF]">Nom complet</span> et{' '}
-                      <span className="font-mono text-[#7624A8] dark:text-[#D896FF]">Matricule</span>
+                      Colonnes attendues :{' '}
+                      <span className="font-mono text-[#7624A8] dark:text-[#D896FF]">Nom</span>,{' '}
+                      <span className="font-mono text-[#7624A8] dark:text-[#D896FF]">Matricule</span>,{' '}
+                      <span className="font-mono text-[#7624A8] dark:text-[#D896FF]">Rôle</span> et{' '}
+                      <span className="font-mono text-[#7624A8] dark:text-[#D896FF]">Projet</span>
                     </div>
                     <p className="text-slate-600 dark:text-[#C8C2D0]">
-                      Les comptes importés reçoivent automatiquement le rôle Employé, sans e-mail, avec le mot de passe provisoire{' '}
-                      <span className="font-mono">2026-OWT-&#123;MATRICULE&#125;</span>. Les comptes déjà existants ne sont jamais modifiés.
+                      Rôles acceptés : <span className="font-medium">Employé</span>,{' '}
+                      <span className="font-medium">Superviseur</span>
+                      {isAdmin ? (
+                        <>
+                          , <span className="font-medium">Manager</span>
+                        </>
+                      ) : (
+                        ' (le rôle Manager est réservé à l’Administrateur)'
+                      )}
+                      . Indiquez le code ou le nom exact du projet ; séparez plusieurs projets par{' '}
+                      <span className="font-mono font-semibold">;</span> (ex :{' '}
+                      <span className="font-mono">PROJET_A; PROJET_B</span>).
+                    </p>
+                    <p className="text-[11px] text-slate-500 dark:text-[#C8C2D0]/80">
+                      Mot de passe provisoire généré automatiquement :{' '}
+                      <span className="font-mono">2026-OWT-&#123;MATRICULE&#125;</span>. Les comptes existants ne sont jamais modifiés.
                     </p>
                   </div>
                   <div className="shrink-0">
@@ -2113,13 +2139,15 @@ export function EmployeesTeamsView({
                       </div>
                     </div>
 
-                    <div className="border border-slate-200 dark:border-[#393342] rounded-lg overflow-hidden max-h-72 overflow-y-auto">
+                    <div className="border border-slate-200 dark:border-[#393342] rounded-lg overflow-hidden max-h-72 overflow-y-auto overflow-x-auto">
                       <table className="w-full text-left border-collapse text-xs">
                         <thead className="sticky top-0 bg-slate-50 dark:bg-[#211E27] border-b border-slate-200 dark:border-[#393342] text-slate-500 dark:text-[#C8C2D0]">
                           <tr>
                             <th className="py-2.5 px-3">Ligne</th>
-                            <th className="py-2.5 px-3">Nom complet</th>
+                            <th className="py-2.5 px-3">Nom</th>
                             <th className="py-2.5 px-3">Matricule</th>
+                            <th className="py-2.5 px-3">Rôle</th>
+                            <th className="py-2.5 px-3">Projets</th>
                             <th className="py-2.5 px-3">Statut</th>
                             <th className="py-2.5 px-3">Détail / Motif de rejet</th>
                           </tr>
@@ -2135,6 +2163,14 @@ export function EmployeesTeamsView({
                               </td>
                               <td className="py-2 px-3 font-mono text-slate-800 dark:text-white">
                                 {row.matricule || '—'}
+                              </td>
+                              <td className="py-2 px-3 text-slate-700 dark:text-[#C8C2D0] whitespace-nowrap">
+                                {row.roleLabel ?? (row.rawRole || '—')}
+                              </td>
+                              <td className="py-2 px-3 text-slate-700 dark:text-[#C8C2D0]">
+                                {row.projectLabels.length > 0
+                                  ? row.projectLabels.join(' ; ')
+                                  : row.rawProjects || '—'}
                               </td>
                               <td className="py-2 px-3 whitespace-nowrap">
                                 {row.status === 'valid' ? (
@@ -2152,7 +2188,10 @@ export function EmployeesTeamsView({
                                 )}
                               </td>
                               <td className="py-2 px-3 text-slate-600 dark:text-[#C8C2D0]">
-                                {row.reason ?? 'Prêt pour création (Employé)'}
+                                {row.reason ??
+                                  `Prêt pour création (${row.roleLabel} · ${row.projectLabels.length} projet${
+                                    row.projectLabels.length > 1 ? 's' : ''
+                                  })`}
                               </td>
                             </tr>
                           ))}
@@ -2219,10 +2258,10 @@ export function EmployeesTeamsView({
                     <div className="flex flex-col sm:flex-row sm:items-center sm:justify-between gap-2">
                       <div>
                         <h4 className="text-xs font-semibold text-slate-900 dark:text-white">
-                          Comptes créés et mots de passe provisoires
+                          Comptes créés, affectations projets et mots de passe provisoires
                         </h4>
                         <p className="text-[11px] text-slate-500 dark:text-[#C8C2D0]">
-                          Ces mots de passe provisoires sont affichés uniquement ici pour transmission aux employés ; seul leur hash est stocké.
+                          Ces mots de passe provisoires sont affichés uniquement ici pour transmission aux utilisateurs ; seul leur hash est stocké.
                         </p>
                       </div>
                       <button
@@ -2232,7 +2271,7 @@ export function EmployeesTeamsView({
                             excelResult.execution.createdAccounts
                               .map(
                                 (acc) =>
-                                  `${acc.matricule}\t${acc.fullName}\t${acc.provisionalPassword}`
+                                  `${acc.matricule}\t${acc.fullName}\t${acc.roleLabel}\t${acc.assignedProjects.join('; ')}\t${acc.provisionalPassword}`
                               )
                               .join('\n'),
                             'excel-all'
@@ -2245,12 +2284,14 @@ export function EmployeesTeamsView({
                       </button>
                     </div>
 
-                    <div className="border border-slate-200 dark:border-[#393342] rounded-lg overflow-hidden max-h-64 overflow-y-auto">
+                    <div className="border border-slate-200 dark:border-[#393342] rounded-lg overflow-hidden max-h-64 overflow-y-auto overflow-x-auto">
                       <table className="w-full text-left border-collapse text-xs">
                         <thead className="sticky top-0 bg-slate-50 dark:bg-[#211E27] border-b border-slate-200 dark:border-[#393342] text-slate-500 dark:text-[#C8C2D0]">
                           <tr>
                             <th className="py-2.5 px-3">Matricule</th>
                             <th className="py-2.5 px-3">Nom complet</th>
+                            <th className="py-2.5 px-3">Rôle</th>
+                            <th className="py-2.5 px-3">Projets affectés</th>
                             <th className="py-2.5 px-3">Mot de passe provisoire</th>
                             <th className="py-2.5 px-3 text-right">Action</th>
                           </tr>
@@ -2263,6 +2304,12 @@ export function EmployeesTeamsView({
                               </td>
                               <td className="py-2 px-3 font-medium text-slate-900 dark:text-white">
                                 {acc.fullName}
+                              </td>
+                              <td className="py-2 px-3 text-slate-700 dark:text-[#C8C2D0] whitespace-nowrap">
+                                {acc.roleLabel}
+                              </td>
+                              <td className="py-2 px-3 text-slate-700 dark:text-[#C8C2D0]">
+                                {acc.assignedProjects.join(' ; ')}
                               </td>
                               <td className="py-2 px-3 font-mono text-slate-900 dark:text-white">
                                 {acc.provisionalPassword}

@@ -42,6 +42,7 @@ import { canAccessModule, getDefaultModuleForRole, hasPermission } from './core/
 import {
   CreateUserInput,
   ExcelImportExecutionResult,
+  ExcelImportRowInput,
   clockService,
   storageService,
 } from './services/storageService';
@@ -116,9 +117,10 @@ export default function App() {
   const [qualityCriteria, setQualityCriteria] = useState<QualityCriterionConfig[]>(() =>
     storageService.getQualityCriteria()
   );
-  const [qualityControls, setQualityControls] = useState<QualityControlRecord[]>(() =>
-    storageService.getQualityControls()
-  );
+  const [qualityControls, setQualityControls] = useState<QualityControlRecord[]>(() => {
+    const u = storageService.getSessionUser();
+    return u ? storageService.getQualityControlsForUser(u).records : [];
+  });
   const [correctionRequests, setCorrectionRequests] = useState<CorrectionRequest[]>(() =>
     storageService.getCorrectionRequests()
   );
@@ -176,7 +178,9 @@ export default function App() {
     setReferenceTimes(storageService.getReferenceTimes());
     setObjectives(storageService.getObjectives());
     setQualityCriteria(storageService.getQualityCriteria());
-    setQualityControls(storageService.getQualityControls());
+    setQualityControls(
+      targetUser ? storageService.getQualityControlsForUser(targetUser).records : []
+    );
     setCorrectionRequests(storageService.getCorrectionRequests());
     setAuditLogs(storageService.getAuditLogs());
     setPlanningAuthorizedUserIds(storageService.getPlanningAuthorizedUserIds());
@@ -302,7 +306,7 @@ export default function App() {
       return validationErrors;
     }
     setActivities(storageService.getActivitiesForUser(currentUser.id));
-    setQualityControls(storageService.getQualityControls());
+    setQualityControls(storageService.getQualityControlsForUser(currentUser).records);
     setTreatmentActivities(storageService.getAllTreatmentActivities());
     setEmployees(storageService.getEmployees());
     setLastSavedActivity(savedRecord);
@@ -389,7 +393,7 @@ export default function App() {
   };
 
   const handleImportEmployeesExcel = async (
-    rows: Array<{ rowNumber: number; fullName: string; matricule: string }>
+    rows: ExcelImportRowInput[]
   ): Promise<ExcelImportExecutionResult> => {
     if (!currentUser) {
       return {
@@ -402,6 +406,7 @@ export default function App() {
     const res = await storageService.importEmployeesFromExcel(rows, currentUser);
     setEmployees(res.users);
     setSchedules(storageService.getSchedules());
+    setAllProjects(storageService.getProjects());
     setAuditLogs(storageService.getAuditLogs());
     return res;
   };
@@ -498,10 +503,13 @@ export default function App() {
       criteriaResults: QualityCriterionResult[];
       observations: string;
     }
-  ) => {
-    if (!currentUser) return;
-    setQualityControls(storageService.evaluateQualityControl(qcId, payload, currentUser));
+  ): { error?: string } => {
+    if (!currentUser) return { error: 'Session expirée.' };
+    const res = storageService.evaluateQualityControl(qcId, payload, currentUser);
+    setQualityControls(res.records);
+    setTreatmentActivities(storageService.getAllTreatmentActivities());
     setAuditLogs(storageService.getAuditLogs());
+    return res.error ? { error: res.error } : {};
   };
 
   const handleAddCriterion = (label: string) => {
@@ -511,7 +519,7 @@ export default function App() {
   };
 
   const handleToggleCriterion = (id: string, active: boolean) => {
-    setQualityCriteria(storageService.toggleQualityCriterion(id, active));
+    setQualityCriteria(storageService.toggleQualityCriterion(id, active, currentUser ?? undefined));
   };
 
   const handleSaveReferenceTime = (companyId: string, taskId: string, minutes: number) => {
@@ -970,7 +978,7 @@ export default function App() {
               qualityControls={qualityControls}
               qualityCriteria={qualityCriteria}
               companies={companies}
-              projects={allProjects}
+              projects={storageService.getQualityControlProjectsForUser(currentUser)}
               employees={employees}
               onEvaluateQc={handleEvaluateQc}
               onAddCriterion={handleAddCriterion}

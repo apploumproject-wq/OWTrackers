@@ -11,6 +11,7 @@ import {
   QualityCriterionResult,
   QualityStatus,
 } from '../../core/types';
+import { storageService } from '../../services/storageService';
 import { formatDateTimeFr, formatDurationHM } from '../../utils/formatters';
 import {
   QUALITY_STATUS_LABELS,
@@ -33,7 +34,7 @@ interface QualityControlViewProps {
       criteriaResults: QualityCriterionResult[];
       observations: string;
     }
-  ) => void;
+  ) => void | { error?: string };
   onAddCriterion: (label: string) => void;
   onToggleCriterion: (id: string, active: boolean) => void;
 }
@@ -55,6 +56,7 @@ export function QualityControlView({
   const [taskFilter, setTaskFilter] = useState<string>('all');
   const [employeeFilter, setEmployeeFilter] = useState<string>('all');
   const [selectedQc, setSelectedQc] = useState<QualityControlRecord | null>(null);
+  const [actionError, setActionError] = useState<string | null>(null);
   const [showCriteriaConfig, setShowCriteriaConfig] = useState(false);
   const [newCriterionLabel, setNewCriterionLabel] = useState('');
 
@@ -66,39 +68,82 @@ export function QualityControlView({
   const isSupervisor = user.role === 'supervisor';
   const canConfigureCriteria = user.role === 'manager' || user.role === 'admin';
 
+  const visibleProjects = useMemo(
+    () => (isSupervisor ? projects.filter((p) => p.active) : projects),
+    [projects, isSupervisor]
+  );
+
+  const authorizedProjectIdSet = useMemo(
+    () => new Set(visibleProjects.map((p) => p.id)),
+    [visibleProjects]
+  );
+
+  const effectiveProjectFilter = useMemo(() => {
+    if (projectFilter === 'all') return 'all';
+    if (isSupervisor) {
+      return authorizedProjectIdSet.has(projectFilter) ? projectFilter : 'all';
+    }
+    return projectFilter;
+  }, [projectFilter, isSupervisor, authorizedProjectIdSet]);
+
+  const authorizedControls = useMemo(
+    () =>
+      isSupervisor
+        ? qualityControls.filter(
+            (q) => Boolean(q.projectId) && authorizedProjectIdSet.has(q.projectId!)
+          )
+        : qualityControls,
+    [qualityControls, isSupervisor, authorizedProjectIdSet]
+  );
+
+  const employeeOptions = useMemo(() => {
+    if (!isSupervisor) return employees;
+    const qcEmployeeIds = new Set(authorizedControls.map((q) => q.employeeId));
+    return employees.filter(
+      (emp) =>
+        qcEmployeeIds.has(emp.id) ||
+        visibleProjects.some((p) => storageService.isEmployeeAssignedToProject(emp, p))
+    );
+  }, [employees, isSupervisor, authorizedControls, visibleProjects]);
+
   const companyOptions = useMemo(() => {
     const map = new Map<string, { id: string; label: string }>();
     const scopedProjects =
-      projectFilter !== 'all' && projectFilter !== 'none'
-        ? projects.filter((p) => p.id === projectFilter)
-        : projectFilter === 'none'
+      effectiveProjectFilter !== 'all' && effectiveProjectFilter !== 'none'
+        ? visibleProjects.filter((p) => p.id === effectiveProjectFilter)
+        : effectiveProjectFilter === 'none'
         ? []
-        : projects;
+        : visibleProjects;
     for (const p of scopedProjects) {
       for (const c of p.companies ?? []) {
         map.set(c.id, {
           id: c.id,
-          label: projectFilter === 'all' ? `${c.name} (${p.name})` : c.name,
+          label: effectiveProjectFilter === 'all' ? `${c.name} (${p.name})` : c.name,
         });
       }
     }
-    for (const q of qualityControls) {
+    for (const q of authorizedControls) {
       if (!q.companyId) continue;
-      if (projectFilter === 'none' && q.projectId) continue;
-      if (projectFilter !== 'all' && projectFilter !== 'none' && q.projectId !== projectFilter)
+      if (effectiveProjectFilter === 'none' && q.projectId) continue;
+      if (
+        effectiveProjectFilter !== 'all' &&
+        effectiveProjectFilter !== 'none' &&
+        q.projectId !== effectiveProjectFilter
+      ) {
         continue;
+      }
       if (!map.has(q.companyId)) {
         const baseName = q.companyName?.trim() || q.companyId;
         map.set(q.companyId, {
           id: q.companyId,
           label:
-            projectFilter === 'all' && q.projectName
+            effectiveProjectFilter === 'all' && q.projectName
               ? `${baseName} (${q.projectName})`
               : baseName,
         });
       }
     }
-    if (projectFilter === 'all' || projectFilter === 'none') {
+    if (!isSupervisor && (effectiveProjectFilter === 'all' || effectiveProjectFilter === 'none')) {
       for (const c of companies) {
         if (!map.has(c.id)) {
           map.set(c.id, { id: c.id, label: c.name });
@@ -106,64 +151,68 @@ export function QualityControlView({
       }
     }
     return Array.from(map.values());
-  }, [projects, qualityControls, companies, projectFilter]);
+  }, [visibleProjects, authorizedControls, companies, effectiveProjectFilter, isSupervisor]);
 
   const taskOptions = useMemo(() => {
     const map = new Map<string, { id: string; label: string }>();
     const scopedProjects =
-      projectFilter !== 'all' && projectFilter !== 'none'
-        ? projects.filter((p) => p.id === projectFilter)
-        : projectFilter === 'none'
+      effectiveProjectFilter !== 'all' && effectiveProjectFilter !== 'none'
+        ? visibleProjects.filter((p) => p.id === effectiveProjectFilter)
+        : effectiveProjectFilter === 'none'
         ? []
-        : projects;
+        : visibleProjects;
     for (const p of scopedProjects) {
       for (const t of p.tasks ?? []) {
         map.set(t.id, {
           id: t.id,
-          label: projectFilter === 'all' ? `${t.name} (${p.name})` : t.name,
+          label: effectiveProjectFilter === 'all' ? `${t.name} (${p.name})` : t.name,
         });
       }
     }
-    for (const q of qualityControls) {
+    for (const q of authorizedControls) {
       if (!q.taskId) continue;
-      if (projectFilter === 'none' && q.projectId) continue;
-      if (projectFilter !== 'all' && projectFilter !== 'none' && q.projectId !== projectFilter)
+      if (effectiveProjectFilter === 'none' && q.projectId) continue;
+      if (
+        effectiveProjectFilter !== 'all' &&
+        effectiveProjectFilter !== 'none' &&
+        q.projectId !== effectiveProjectFilter
+      ) {
         continue;
+      }
       if (!map.has(q.taskId)) {
         const baseName = q.taskName?.trim() || q.taskId;
         map.set(q.taskId, {
           id: q.taskId,
           label:
-            projectFilter === 'all' && q.projectName
+            effectiveProjectFilter === 'all' && q.projectName
               ? `${baseName} (${q.projectName})`
               : baseName,
         });
       }
     }
     return Array.from(map.values());
-  }, [projects, qualityControls, projectFilter]);
+  }, [visibleProjects, authorizedControls, effectiveProjectFilter]);
 
   const scopedControls = useMemo(() => {
-    const base =
-      isSupervisor && user.teamId
-        ? qualityControls.filter((q) => q.teamId === user.teamId)
-        : qualityControls;
-    return base.filter((q) => {
+    return authorizedControls.filter((q) => {
       if (statusFilter !== 'all' && q.status !== statusFilter) return false;
-      if (projectFilter === 'none' && q.projectId) return false;
-      if (projectFilter !== 'all' && projectFilter !== 'none' && q.projectId !== projectFilter)
+      if (effectiveProjectFilter === 'none' && q.projectId) return false;
+      if (
+        effectiveProjectFilter !== 'all' &&
+        effectiveProjectFilter !== 'none' &&
+        q.projectId !== effectiveProjectFilter
+      ) {
         return false;
+      }
       if (companyFilter !== 'all' && q.companyId !== companyFilter) return false;
       if (taskFilter !== 'all' && q.taskId !== taskFilter) return false;
       if (employeeFilter !== 'all' && q.employeeId !== employeeFilter) return false;
       return true;
     });
   }, [
-    qualityControls,
-    isSupervisor,
-    user.teamId,
+    authorizedControls,
     statusFilter,
-    projectFilter,
+    effectiveProjectFilter,
     companyFilter,
     taskFilter,
     employeeFilter,
@@ -171,10 +220,7 @@ export function QualityControlView({
 
   // RÈGLE STRICTE : Les dossiers non contrôlés ('en_attente') ne sont JAMAIS comptabilisés comme conformes
   const metrics = useMemo(() => {
-    const scopeAll =
-      isSupervisor && user.teamId
-        ? qualityControls.filter((q) => q.teamId === user.teamId)
-        : qualityControls;
+    const scopeAll = authorizedControls;
     const pending = scopeAll.filter((q) => q.status === 'en_attente').length;
     const controlled = scopeAll.filter((q) => q.status !== 'en_attente');
     const compliant = controlled.filter(
@@ -185,18 +231,27 @@ export function QualityControlView({
     const complianceRate =
       controlled.length > 0 ? Math.round((compliant / controlled.length) * 100) : null;
     return { pending, controlledCount: controlled.length, complianceRate, toFix, rejected };
-  }, [qualityControls, isSupervisor, user.teamId]);
+  }, [authorizedControls]);
 
   const openInspection = (qc: QualityControlRecord) => {
-    setSelectedQc(qc);
+    setActionError(null);
+    const accessCheck = storageService.getQualityControlByIdForUser(qc.id, user);
+    if (accessCheck.error || !accessCheck.record) {
+      setActionError(
+        accessCheck.error ?? 'Accès refusé : dossier hors de votre périmètre.'
+      );
+      return;
+    }
+    const authorizedQc = accessCheck.record;
+    setSelectedQc(authorizedQc);
     setEvalStatus(
-      qc.status !== 'en_attente' ? qc.status : 'valide'
+      authorizedQc.status !== 'en_attente' ? authorizedQc.status : 'valide'
     );
-    setEvalObservations(qc.observations ?? '');
+    setEvalObservations(authorizedQc.observations ?? '');
     const activeCriteria = qualityCriteria.filter((c) => c.active);
     const initialRatings: Record<string, CriterionRating> = {};
     for (const crit of activeCriteria) {
-      const existing = qc.criteriaResults.find((r) => r.criterionId === crit.id);
+      const existing = authorizedQc.criteriaResults.find((r) => r.criterionId === crit.id);
       initialRatings[crit.id] = existing?.rating ?? 'conforme';
     }
     setEvalRatings(initialRatings);
@@ -205,17 +260,23 @@ export function QualityControlView({
   const handleSaveEvaluation = (e: React.FormEvent) => {
     e.preventDefault();
     if (!selectedQc) return;
+    setActionError(null);
     const activeCriteria = qualityCriteria.filter((c) => c.active);
     const criteriaResults: QualityCriterionResult[] = activeCriteria.map((c) => ({
       criterionId: c.id,
       label: c.label,
       rating: evalRatings[c.id] ?? 'conforme',
     }));
-    onEvaluateQc(selectedQc.id, {
+    const res = onEvaluateQc(selectedQc.id, {
       status: evalStatus,
       criteriaResults,
       observations: evalObservations,
     });
+    if (res && res.error) {
+      setActionError(res.error);
+      setSelectedQc(null);
+      return;
+    }
     setSelectedQc(null);
   };
 
@@ -243,6 +304,20 @@ export function QualityControlView({
           ) : undefined
         }
       />
+
+      {actionError && (
+        <div className="text-xs text-red-700 dark:text-red-300 bg-red-50 dark:bg-red-950/40 border border-red-200 dark:border-red-800/60 rounded-lg px-4 py-3 flex items-center justify-between gap-3">
+          <span>{actionError}</span>
+          <button
+            type="button"
+            onClick={() => setActionError(null)}
+            className="text-red-700 dark:text-red-300 hover:opacity-75 cursor-pointer"
+            aria-label="Fermer"
+          >
+            <X className="w-3.5 h-3.5" />
+          </button>
+        </div>
+      )}
 
       <div className="grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-4 gap-4">
         <StatTile label="En attente de contrôle" value={metrics.pending} accent="amber" />
@@ -333,7 +408,7 @@ export function QualityControlView({
         </select>
 
         <select
-          value={projectFilter}
+          value={effectiveProjectFilter}
           onChange={(e) => {
             setProjectFilter(e.target.value);
             setCompanyFilter('all');
@@ -342,8 +417,8 @@ export function QualityControlView({
           className="px-3 py-2 text-xs border border-slate-300 dark:border-[#393342] rounded-lg bg-white dark:bg-[#211E27] text-slate-900 dark:text-white focus:outline-none focus:border-[#A83CE2]"
         >
           <option value="all">Tous les projets</option>
-          <option value="none">Sans projet (historique)</option>
-          {projects.map((p) => (
+          {!isSupervisor && <option value="none">Sans projet (historique)</option>}
+          {visibleProjects.map((p) => (
             <option key={p.id} value={p.id}>
               {p.name} {!p.active ? '(désactivé)' : ''}
             </option>
@@ -382,7 +457,7 @@ export function QualityControlView({
           className="px-3 py-2 text-xs border border-slate-300 dark:border-[#393342] rounded-lg bg-white dark:bg-[#211E27] text-slate-900 dark:text-white focus:outline-none focus:border-[#A83CE2]"
         >
           <option value="all">Tous les employés</option>
-          {employees.map((emp) => (
+          {employeeOptions.map((emp) => (
             <option key={emp.id} value={emp.id}>
               {emp.fullName}
               {emp.accountStatus !== 'actif' ? ' (Désactivé)' : ''}

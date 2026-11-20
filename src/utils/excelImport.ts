@@ -1,12 +1,20 @@
 import * as XLSX from 'xlsx';
-import { ManagedEmployee } from '../core/types';
+import { ROLE_LABELS } from '../core/permissions';
+import { ManagedEmployee, ProjectRecord, UserRole } from '../core/types';
 
 export type ExcelRowStatus = 'valid' | 'duplicate' | 'invalid';
+export type ImportableUserRole = Exclude<UserRole, 'admin'>;
 
 export interface ExcelImportRowAnalysis {
   rowNumber: number;
   fullName: string;
   matricule: string;
+  rawRole: string;
+  role?: ImportableUserRole;
+  roleLabel?: string;
+  rawProjects: string;
+  projectIds: string[];
+  projectLabels: string[];
   status: ExcelRowStatus;
   reason?: string;
 }
@@ -21,7 +29,13 @@ export interface ExcelImportPreview {
   error?: string;
 }
 
-function normalizeColumnHeader(value: unknown): string {
+export interface AnalyzeExcelOptions {
+  actorRole: UserRole;
+  projects: ProjectRecord[];
+  assignableProjectIds?: string[];
+}
+
+export function normalizeImportText(value: unknown): string {
   return String(value ?? '')
     .normalize('NFD')
     .replace(/[\u0300-\u036f]/g, '')
@@ -30,10 +44,107 @@ function normalizeColumnHeader(value: unknown): string {
     .trim();
 }
 
+export function parseImportUserRole(rawRole: unknown): {
+  role?: ImportableUserRole;
+  error?: string;
+} {
+  const trimmed = String(rawRole ?? '').trim();
+  if (!trimmed) {
+    return { error: 'Rôle manquant (Employé, Superviseur ou Manager).' };
+  }
+  const norm = normalizeImportText(trimmed);
+  if (norm === 'employe' || norm === 'employes' || norm === 'employee' || norm === 'employees') {
+    return { role: 'employee' };
+  }
+  if (
+    norm === 'superviseur' ||
+    norm === 'superviseurs' ||
+    norm === 'supervisor' ||
+    norm === 'supervisors'
+  ) {
+    return { role: 'supervisor' };
+  }
+  if (norm === 'manager' || norm === 'managers') {
+    return { role: 'manager' };
+  }
+  return {
+    error: `Rôle invalide : "${trimmed}". Valeurs autorisées : Employé, Superviseur, Manager.`,
+  };
+}
+
+export function resolveImportProjects(
+  rawProjects: unknown,
+  allProjects: ProjectRecord[],
+  assignableProjectIds: Set<string>
+): {
+  projectIds: string[];
+  projectLabels: string[];
+  errors: string[];
+} {
+  const rawStr = String(rawProjects ?? '').trim();
+  if (!rawStr) {
+    return {
+      projectIds: [],
+      projectLabels: [],
+      errors: ['Projet manquant.'],
+    };
+  }
+
+  const tokens = rawStr
+    .split(';')
+    .map((t) => t.trim())
+    .filter(Boolean);
+
+  if (tokens.length === 0) {
+    return {
+      projectIds: [],
+      projectLabels: [],
+      errors: ['Projet manquant ou invalide.'],
+    };
+  }
+
+  const projectIds: string[] = [];
+  const projectLabels: string[] = [];
+  const seenIds = new Set<string>();
+  const errors: string[] = [];
+
+  for (const token of tokens) {
+    const tokenKey = token.trim().toLowerCase();
+    const matchedByCode = allProjects.find(
+      (p) => p.code.trim().toLowerCase() === tokenKey
+    );
+    const matched =
+      matchedByCode ??
+      allProjects.find((p) => p.name.trim().toLowerCase() === tokenKey);
+
+    if (!matched) {
+      errors.push(`Projet introuvable : "${token}".`);
+      continue;
+    }
+    if (!matched.active) {
+      errors.push(`Projet désactivé : "${matched.name}" (${matched.code}).`);
+      continue;
+    }
+    if (!assignableProjectIds.has(matched.id)) {
+      errors.push(`Projet hors périmètre autorisé : "${matched.name}" (${matched.code}).`);
+      continue;
+    }
+
+    if (!seenIds.has(matched.id)) {
+      seenIds.add(matched.id);
+      projectIds.push(matched.id);
+      projectLabels.push(`${matched.code} — ${matched.name}`);
+    }
+  }
+
+  return { projectIds, projectLabels, errors };
+}
+
 export function analyzeEmployeeExcelBuffer(
   buffer: ArrayBuffer,
   fileName: string,
-  existingAccounts: ManagedEmployee[]
+  existingAccounts: ManagedEmployee[],
+  options: AnalyzeExcelOptions
 ): ExcelImportPreview {
   const emptyPreview = (error: string): ExcelImportPreview => ({
     fileName,
@@ -44,6 +155,10 @@ export function analyzeEmployeeExcelBuffer(
     rows: [],
     error,
   });
+
+  if (options.actorRole !== 'admin' && options.actorRole !== 'manager') {
+    return emptyPreview('Votre rôle ne permet pas d’importer des utilisateurs.');
+  }
 
   let workbook: XLSX.WorkBook;
   try {
@@ -90,23 +205,37 @@ export function analyzeEmployeeExcelBuffer(
   const headerRow = matrix[headerRowIndex] ?? [];
   let nameColIndex = -1;
   let matriculeColIndex = -1;
+  let roleColIndex = -1;
+  let projectColIndex = -1;
 
   headerRow.forEach((cell, idx) => {
-    const normalized = normalizeColumnHeader(cell);
-    if (normalized === 'nom complet' && nameColIndex === -1) {
+    const normalized = normalizeImportText(cell);
+    if ((normalized === 'nom' || normalized === 'nom complet') && nameColIndex === -1) {
       nameColIndex = idx;
     } else if (normalized === 'matricule' && matriculeColIndex === -1) {
       matriculeColIndex = idx;
+    } else if ((normalized === 'role' || normalized === 'roles') && roleColIndex === -1) {
+      roleColIndex = idx;
+    } else if (
+      (normalized === 'projet' ||
+        normalized === 'projets' ||
+        normalized === 'affectation projet' ||
+        normalized === 'affectation au projet') &&
+      projectColIndex === -1
+    ) {
+      projectColIndex = idx;
     }
   });
 
   const missingColumns: string[] = [];
-  if (nameColIndex === -1) missingColumns.push('Nom complet');
+  if (nameColIndex === -1) missingColumns.push('Nom');
   if (matriculeColIndex === -1) missingColumns.push('Matricule');
+  if (roleColIndex === -1) missingColumns.push('Rôle');
+  if (projectColIndex === -1) missingColumns.push('Projet');
 
   if (missingColumns.length > 0) {
     return emptyPreview(
-      `Colonne(s) obligatoire(s) manquante(s) : ${missingColumns.join(', ')}. Le fichier doit contenir les colonnes "Nom complet" et "Matricule".`
+      `Colonne(s) obligatoire(s) manquante(s) : ${missingColumns.join(', ')}. Le fichier doit contenir les colonnes "Nom", "Matricule", "Rôle" et "Projet".`
     );
   }
 
@@ -117,6 +246,10 @@ export function analyzeEmployeeExcelBuffer(
       .filter(Boolean)
   );
   const seenInFile = new Set<string>();
+  const assignableProjectIds = new Set(
+    options.assignableProjectIds ??
+      options.projects.filter((p) => p.active).map((p) => p.id)
+  );
 
   const analyzedRows: ExcelImportRowAnalysis[] = [];
   let validRows = 0;
@@ -134,74 +267,123 @@ export function analyzeEmployeeExcelBuffer(
     const fullName = String(rawRow[nameColIndex] ?? '').trim().replace(/\s+/g, ' ');
     const matricule = String(rawRow[matriculeColIndex] ?? '').trim();
     const matriculeKey = matricule.toLowerCase();
+    const rawRole = String(rawRow[roleColIndex] ?? '').trim();
+    const rawProjects = String(rawRow[projectColIndex] ?? '').trim();
 
-    if (!fullName || fullName.length < 2) {
-      invalidRows += 1;
-      analyzedRows.push({
-        rowNumber,
-        fullName,
-        matricule,
-        status: 'invalid',
-        reason: !fullName
-          ? 'Nom complet manquant.'
-          : 'Nom complet trop court (2 caractères minimum).',
-      });
-      continue;
+    const parsedRole = parseImportUserRole(rawRole);
+    let resolvedRole = parsedRole.role;
+    const rowErrors: string[] = [];
+
+    if (!fullName) {
+      rowErrors.push('Nom complet manquant.');
+    } else if (fullName.length < 2) {
+      rowErrors.push('Nom complet trop court (2 caractères minimum).');
     }
 
-    if (!matricule || matricule.length < 2 || /\s/.test(matricule)) {
-      invalidRows += 1;
-      analyzedRows.push({
-        rowNumber,
-        fullName,
-        matricule,
-        status: 'invalid',
-        reason: !matricule
-          ? 'Matricule manquant.'
-          : /\s/.test(matricule)
-          ? 'Le matricule ne doit pas contenir d’espaces.'
-          : 'Matricule trop court (2 caractères minimum).',
-      });
-      continue;
+    const matriculeStructurallyValid =
+      Boolean(matricule) && matricule.length >= 2 && !/\s/.test(matricule);
+    if (!matricule) {
+      rowErrors.push('Matricule manquant.');
+    } else if (/\s/.test(matricule)) {
+      rowErrors.push('Le matricule ne doit pas contenir d’espaces.');
+    } else if (matricule.length < 2) {
+      rowErrors.push('Matricule trop court (2 caractères minimum).');
     }
 
-    if (seenInFile.has(matriculeKey)) {
+    if (parsedRole.error) {
+      rowErrors.push(parsedRole.error);
+    } else if (resolvedRole === 'manager' && options.actorRole !== 'admin') {
+      rowErrors.push(
+        'Rôle non autorisé : seul un administrateur peut importer un compte Manager.'
+      );
+      resolvedRole = undefined;
+    }
+
+    const projectResolution = resolveImportProjects(
+      rawProjects,
+      options.projects,
+      assignableProjectIds
+    );
+    if (projectResolution.errors.length > 0) {
+      rowErrors.push(...projectResolution.errors);
+    }
+
+    if (matriculeStructurallyValid && seenInFile.has(matriculeKey)) {
       duplicateRows += 1;
       analyzedRows.push({
         rowNumber,
         fullName,
         matricule,
+        rawRole,
+        role: resolvedRole,
+        roleLabel: resolvedRole ? ROLE_LABELS[resolvedRole] : undefined,
+        rawProjects,
+        projectIds: projectResolution.projectIds,
+        projectLabels: projectResolution.projectLabels,
         status: 'duplicate',
         reason: 'Matricule en double dans le fichier Excel.',
       });
       continue;
     }
 
-    if (existingMatricules.has(matriculeKey)) {
+    if (matriculeStructurallyValid && existingMatricules.has(matriculeKey)) {
       seenInFile.add(matriculeKey);
       duplicateRows += 1;
       analyzedRows.push({
         rowNumber,
         fullName,
         matricule,
+        rawRole,
+        role: resolvedRole,
+        roleLabel: resolvedRole ? ROLE_LABELS[resolvedRole] : undefined,
+        rawProjects,
+        projectIds: projectResolution.projectIds,
+        projectLabels: projectResolution.projectLabels,
         status: 'duplicate',
         reason: 'Matricule déjà présent dans OWTrackers (compte conservé).',
       });
       continue;
     }
 
-    seenInFile.add(matriculeKey);
+    if (matriculeStructurallyValid) {
+      seenInFile.add(matriculeKey);
+    }
+
+    if (rowErrors.length > 0 || !resolvedRole) {
+      invalidRows += 1;
+      analyzedRows.push({
+        rowNumber,
+        fullName,
+        matricule,
+        rawRole,
+        role: resolvedRole,
+        roleLabel: resolvedRole ? ROLE_LABELS[resolvedRole] : undefined,
+        rawProjects,
+        projectIds: projectResolution.projectIds,
+        projectLabels: projectResolution.projectLabels,
+        status: 'invalid',
+        reason: rowErrors.join(' '),
+      });
+      continue;
+    }
+
     validRows += 1;
     analyzedRows.push({
       rowNumber,
       fullName,
       matricule,
+      rawRole,
+      role: resolvedRole,
+      roleLabel: ROLE_LABELS[resolvedRole],
+      rawProjects,
+      projectIds: projectResolution.projectIds,
+      projectLabels: projectResolution.projectLabels,
       status: 'valid',
     });
   }
 
   if (analyzedRows.length === 0) {
-    return emptyPreview('Aucune ligne d’employé trouvée sous la ligne d’en-tête.');
+    return emptyPreview('Aucune ligne d’utilisateur trouvée sous la ligne d’en-tête.');
   }
 
   return {
@@ -213,3 +395,4 @@ export function analyzeEmployeeExcelBuffer(
     rows: analyzedRows,
   };
 }
+

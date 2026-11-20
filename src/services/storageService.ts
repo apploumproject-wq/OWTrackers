@@ -68,6 +68,11 @@ import {
   verifyPassword,
 } from '../utils/crypto';
 import {
+  ImportableUserRole,
+  parseImportUserRole,
+  resolveImportProjects,
+} from '../utils/excelImport';
+import {
   formatYmdFr,
   generateUniqueId,
   getMondayOfWeekYmd,
@@ -230,9 +235,22 @@ export interface CreateUserInput {
   assignedProjectIds?: string[];
 }
 
+export interface ExcelImportRowInput {
+  rowNumber: number;
+  fullName: string;
+  matricule: string;
+  rawRole?: string;
+  role?: UserRole;
+  rawProjects?: string;
+  projectIds?: string[];
+}
+
 export interface ExcelImportCreatedAccount {
   fullName: string;
   matricule: string;
+  role: UserRole;
+  roleLabel: string;
+  assignedProjects: string[];
   provisionalPassword: string;
 }
 
@@ -917,19 +935,25 @@ export const storageService = {
   },
 
   async importEmployeesFromExcel(
-    rows: Array<{ rowNumber: number; fullName: string; matricule: string }>,
+    rows: ExcelImportRowInput[],
     actor: AppUser
   ): Promise<ExcelImportExecutionResult> {
     const accounts = this.getUsers();
+    const actorAccount = accounts.find((u) => u.id === actor.id && u.accountStatus === 'actif');
 
-    if (actor.role !== 'admin' && actor.role !== 'manager') {
+    if (!actorAccount || (actorAccount.role !== 'admin' && actorAccount.role !== 'manager')) {
       return {
         users: accounts,
         createdAccounts: [],
         rejectedItems: [],
-        error: 'Votre rôle ne permet pas d’importer des comptes employés.',
+        error: 'Votre rôle ne permet pas d’importer des comptes utilisateurs.',
       };
     }
+
+    const allProjects = this.getProjects();
+    const assignableProjects = this.getAssignableProjectsForActor(actor);
+    const assignableProjectSet = new Set(assignableProjects.map((p) => p.id));
+    const projectsById = new Map(allProjects.map((p) => [p.id, p]));
 
     const knownMatricules = new Set(
       accounts
@@ -943,6 +967,7 @@ export const storageService = {
     const newSchedules: EmployeeScheduleConfig[] = [];
     const createdAccounts: ExcelImportCreatedAccount[] = [];
     const rejectedItems: ExcelImportExecutionResult['rejectedItems'] = [];
+    const projectNewEmployeeIds = new Map<string, string[]>();
 
     for (const row of rows) {
       const cleanName = row.fullName.trim().replace(/\s+/g, ' ');
@@ -979,6 +1004,100 @@ export const storageService = {
         continue;
       }
 
+      // Validation stricte du rôle
+      let resolvedRole: ImportableUserRole | undefined;
+      if (row.role === 'employee' || row.role === 'supervisor' || row.role === 'manager') {
+        resolvedRole = row.role;
+      } else if (row.role === 'admin') {
+        rejectedItems.push({
+          rowNumber: row.rowNumber,
+          fullName: cleanName,
+          matricule: cleanMatricule,
+          reason: 'Le rôle Administrateur ne peut pas être attribué via import Excel.',
+        });
+        continue;
+      } else {
+        const parsedRole = parseImportUserRole(row.rawRole ?? '');
+        if (parsedRole.error || !parsedRole.role) {
+          rejectedItems.push({
+            rowNumber: row.rowNumber,
+            fullName: cleanName,
+            matricule: cleanMatricule,
+            reason: parsedRole.error ?? 'Rôle invalide.',
+          });
+          continue;
+        }
+        resolvedRole = parsedRole.role;
+      }
+
+      if (resolvedRole === 'manager' && actorAccount.role !== 'admin') {
+        rejectedItems.push({
+          rowNumber: row.rowNumber,
+          fullName: cleanName,
+          matricule: cleanMatricule,
+          reason: 'Rôle non autorisé : seul un administrateur peut importer un compte Manager.',
+        });
+        continue;
+      }
+
+      // Validation stricte des projets (sans affectation silencieuse par défaut)
+      let resolvedProjectIds: string[] = [];
+      let resolvedProjectLabels: string[] = [];
+
+      if (row.rawProjects !== undefined) {
+        const resProj = resolveImportProjects(row.rawProjects, allProjects, assignableProjectSet);
+        if (resProj.errors.length > 0 || resProj.projectIds.length === 0) {
+          rejectedItems.push({
+            rowNumber: row.rowNumber,
+            fullName: cleanName,
+            matricule: cleanMatricule,
+            reason:
+              resProj.errors.length > 0
+                ? resProj.errors.join(' ')
+                : 'Aucun projet valide trouvé.',
+          });
+          continue;
+        }
+        resolvedProjectIds = resProj.projectIds;
+        resolvedProjectLabels = resProj.projectLabels;
+      } else if (row.projectIds && row.projectIds.length > 0) {
+        const errors: string[] = [];
+        const uniqueIds: string[] = [];
+        const labels: string[] = [];
+        for (const pid of row.projectIds) {
+          const proj = projectsById.get(pid);
+          if (!proj) {
+            errors.push(`Projet introuvable (${pid}).`);
+          } else if (!proj.active) {
+            errors.push(`Projet désactivé : "${proj.name}" (${proj.code}).`);
+          } else if (!assignableProjectSet.has(proj.id)) {
+            errors.push(`Projet hors périmètre autorisé : "${proj.name}" (${proj.code}).`);
+          } else if (!uniqueIds.includes(proj.id)) {
+            uniqueIds.push(proj.id);
+            labels.push(`${proj.code} — ${proj.name}`);
+          }
+        }
+        if (errors.length > 0 || uniqueIds.length === 0) {
+          rejectedItems.push({
+            rowNumber: row.rowNumber,
+            fullName: cleanName,
+            matricule: cleanMatricule,
+            reason: errors.length > 0 ? errors.join(' ') : 'Projet manquant.',
+          });
+          continue;
+        }
+        resolvedProjectIds = uniqueIds;
+        resolvedProjectLabels = labels;
+      } else {
+        rejectedItems.push({
+          rowNumber: row.rowNumber,
+          fullName: cleanName,
+          matricule: cleanMatricule,
+          reason: 'Projet manquant.',
+        });
+        continue;
+      }
+
       knownMatricules.add(matriculeKey);
       const provisionalPassword = buildProvisionalPassword(cleanMatricule);
       const passwordHash = await hashPassword(provisionalPassword);
@@ -988,10 +1107,10 @@ export const storageService = {
         matricule: cleanMatricule,
         fullName: cleanName,
         email: undefined,
-        role: 'employee',
+        role: resolvedRole,
         isPrimaryAdmin: false,
         passwordHash,
-        jobTitle: ROLE_LABELS.employee,
+        jobTitle: ROLE_LABELS[resolvedRole],
         hireDate: todayYmd,
         accountStatus: 'actif',
         site: 'Siège',
@@ -1009,20 +1128,32 @@ export const storageService = {
       };
 
       newEmployees.push(emp);
-      newSchedules.push({
-        userId: emp.id,
-        employeeName: emp.fullName,
-        matricule: emp.matricule ?? '',
-        teamId: '',
-        teamName: '',
-        plannedStart: emp.plannedStart,
-        plannedEnd: emp.plannedEnd,
-        restDays: emp.restDays,
-        isCustom: false,
-      });
+      if (resolvedRole === 'employee' || resolvedRole === 'supervisor') {
+        newSchedules.push({
+          userId: emp.id,
+          employeeName: emp.fullName,
+          matricule: emp.matricule ?? '',
+          teamId: '',
+          teamName: '',
+          plannedStart: emp.plannedStart,
+          plannedEnd: emp.plannedEnd,
+          restDays: emp.restDays,
+          isCustom: false,
+        });
+      }
+
+      for (const pid of resolvedProjectIds) {
+        const list = projectNewEmployeeIds.get(pid) ?? [];
+        list.push(emp.id);
+        projectNewEmployeeIds.set(pid, list);
+      }
+
       createdAccounts.push({
         fullName: emp.fullName,
         matricule: emp.matricule ?? '',
+        role: resolvedRole,
+        roleLabel: ROLE_LABELS[resolvedRole],
+        assignedProjects: resolvedProjectLabels,
         provisionalPassword,
       });
     }
@@ -1038,20 +1169,38 @@ export const storageService = {
     const updatedUsers = [...newEmployees, ...accounts];
     safeWriteJson(STORAGE_KEYS.ACCOUNTS, updatedUsers);
 
-    const existingSchedules = this.getSchedules();
-    safeWriteJson(STORAGE_KEYS.SCHEDULES, [...existingSchedules, ...newSchedules]);
+    if (newSchedules.length > 0) {
+      const existingSchedules = this.getSchedules();
+      safeWriteJson(STORAGE_KEYS.SCHEDULES, [...existingSchedules, ...newSchedules]);
+    }
+
+    if (projectNewEmployeeIds.size > 0) {
+      const nowIso = clockService.nowIso();
+      const updatedProjects = allProjects.map((proj) => {
+        const additions = projectNewEmployeeIds.get(proj.id);
+        if (!additions || additions.length === 0) return proj;
+        const additionSet = new Set(additions);
+        return {
+          ...proj,
+          addedEmployeeIds: Array.from(new Set([...proj.addedEmployeeIds, ...additions])),
+          excludedEmployeeIds: proj.excludedEmployeeIds.filter((id) => !additionSet.has(id)),
+          updatedAt: nowIso,
+        };
+      });
+      safeWriteJson(STORAGE_KEYS.PROJECTS, updatedProjects);
+    }
 
     const previewMatricules = createdAccounts
       .slice(0, 8)
-      .map((c) => c.matricule)
+      .map((c) => `${c.matricule} (${c.roleLabel})`)
       .join(', ');
     const suffix = createdAccounts.length > 8 ? ` (+${createdAccounts.length - 8} autres)` : '';
 
     this.appendAuditLog(
       actor,
-      'Import Excel employés',
+      'Import Excel utilisateurs',
       '—',
-      `${createdAccounts.length} employé(s) créé(s) : ${previewMatricules}${suffix}`,
+      `${createdAccounts.length} compte(s) créé(s) : ${previewMatricules}${suffix}`,
       `${rejectedItems.length} ligne(s) ignorée(s)`
     );
 
@@ -1576,6 +1725,10 @@ export const storageService = {
 
   addQualityCriterion(label: string, actor: AppUser): QualityCriterionConfig[] {
     const list = this.getQualityCriteria();
+    const actorAccount = this.getUsers().find((u) => u.id === actor.id && u.accountStatus === 'actif');
+    if (!actorAccount || (actorAccount.role !== 'admin' && actorAccount.role !== 'manager')) {
+      return list;
+    }
     const trimmed = label.trim();
     if (!trimmed) return list;
     const next = [...list, { id: generateUniqueId('crit'), label: trimmed, active: true }];
@@ -1584,10 +1737,58 @@ export const storageService = {
     return next;
   },
 
-  toggleQualityCriterion(id: string, active: boolean): QualityCriterionConfig[] {
-    const next = this.getQualityCriteria().map((c) => (c.id === id ? { ...c, active } : c));
+  toggleQualityCriterion(id: string, active: boolean, actor?: AppUser): QualityCriterionConfig[] {
+    const current = this.getQualityCriteria();
+    if (actor) {
+      const actorAccount = this.getUsers().find((u) => u.id === actor.id && u.accountStatus === 'actif');
+      if (!actorAccount || (actorAccount.role !== 'admin' && actorAccount.role !== 'manager')) {
+        return current;
+      }
+    }
+    const next = current.map((c) => (c.id === id ? { ...c, active } : c));
     safeWriteJson(STORAGE_KEYS.QUALITY_CRITERIA, next);
     return next;
+  },
+
+  canUserManageQuality(actorOrId: AppUser | string): boolean {
+    const actorId = typeof actorOrId === 'string' ? actorOrId : actorOrId.id;
+    const account = this.getUsers().find((u) => u.id === actorId);
+    if (!account || account.accountStatus !== 'actif') return false;
+    if (account.role === 'admin' || account.role === 'manager') return true;
+    if (account.role === 'supervisor') {
+      return hasPermission('supervisor', 'manage:quality', this.getSupervisorPermissions());
+    }
+    return false;
+  },
+
+  getQualityControlProjectsForUser(actor: AppUser): ProjectRecord[] {
+    const actorAccount = this.getUsers().find((u) => u.id === actor.id);
+    if (!actorAccount || actorAccount.accountStatus !== 'actif' || !this.canUserManageQuality(actor)) {
+      return [];
+    }
+    const scoped = this.getProjectsForUser(actor);
+    if (actorAccount.role === 'supervisor') {
+      return scoped.filter((p) => p.active);
+    }
+    return scoped;
+  },
+
+  _isQualityControlAccessibleToActor(
+    qc: QualityControlRecord,
+    actorAccount: ManagedEmployee,
+    authorizedActiveProjectIds: Set<string>
+  ): boolean {
+    if (actorAccount.role === 'admin' || actorAccount.role === 'manager') {
+      return true;
+    }
+    if (actorAccount.role === 'supervisor') {
+      if (!qc.projectId) return false;
+      return authorizedActiveProjectIds.has(qc.projectId);
+    }
+    if (actorAccount.role === 'employee') {
+      return qc.employeeId === actorAccount.id;
+    }
+    return false;
   },
 
   getQualityControls(): QualityControlRecord[] {
@@ -1595,6 +1796,83 @@ export const storageService = {
     if (existing && Array.isArray(existing)) return existing;
     safeWriteJson(STORAGE_KEYS.QUALITY_CONTROLS, []);
     return [];
+  },
+
+  getQualityControlsForUser(actor: AppUser): {
+    records: QualityControlRecord[];
+    error?: string;
+  } {
+    const accounts = this.getUsers();
+    const actorAccount = accounts.find((u) => u.id === actor.id);
+    if (!actorAccount || actorAccount.accountStatus !== 'actif') {
+      return { records: [], error: 'Compte inactif ou introuvable.' };
+    }
+
+    const all = this.getQualityControls();
+
+    if (actorAccount.role === 'employee') {
+      return {
+        records: all.filter((q) => q.employeeId === actorAccount.id),
+      };
+    }
+
+    if (!this.canUserManageQuality(actor)) {
+      return {
+        records: [],
+        error: 'Accès refusé au module Contrôle qualité.',
+      };
+    }
+
+    if (actorAccount.role === 'admin' || actorAccount.role === 'manager') {
+      return { records: all };
+    }
+
+    const authorizedProjectIds = new Set(
+      this.getQualityControlProjectsForUser(actor).map((p) => p.id)
+    );
+    return {
+      records: all.filter((q) =>
+        this._isQualityControlAccessibleToActor(q, actorAccount, authorizedProjectIds)
+      ),
+    };
+  },
+
+  getQualityControlByIdForUser(
+    qcId: string,
+    actor: AppUser
+  ): { record?: QualityControlRecord; error?: string } {
+    const accounts = this.getUsers();
+    const actorAccount = accounts.find((u) => u.id === actor.id);
+    if (!actorAccount || actorAccount.accountStatus !== 'actif') {
+      return { error: 'Session utilisateur invalide ou compte désactivé.' };
+    }
+
+    const target = this.getQualityControls().find((q) => q.id === qcId);
+    if (!target) {
+      return { error: 'Dossier de contrôle qualité introuvable.' };
+    }
+
+    if (actorAccount.role === 'employee') {
+      if (target.employeeId !== actorAccount.id) {
+        return { error: 'Accès refusé : ce dossier ne vous est pas rattaché.' };
+      }
+      return { record: target };
+    }
+
+    if (!this.canUserManageQuality(actor)) {
+      return { error: 'Votre rôle ne permet pas de consulter les dossiers du contrôle qualité.' };
+    }
+
+    const authorizedProjectIds = new Set(
+      this.getQualityControlProjectsForUser(actor).map((p) => p.id)
+    );
+    if (!this._isQualityControlAccessibleToActor(target, actorAccount, authorizedProjectIds)) {
+      return {
+        error: 'Accès refusé : ce dossier appartient à un projet hors de votre périmètre autorisé.',
+      };
+    }
+
+    return { record: target };
   },
 
   evaluateQualityControl(
@@ -1605,23 +1883,55 @@ export const storageService = {
       observations: string;
     },
     controller: AppUser
-  ): QualityControlRecord[] {
+  ): { records: QualityControlRecord[]; updated?: QualityControlRecord; error?: string } {
+    const accounts = this.getUsers();
+    const controllerAccount = accounts.find((u) => u.id === controller.id);
+    if (
+      !controllerAccount ||
+      controllerAccount.accountStatus !== 'actif' ||
+      !this.canUserManageQuality(controller)
+    ) {
+      return {
+        records: this.getQualityControlsForUser(controller).records,
+        error: 'Votre rôle ne permet pas d’effectuer ou de modifier un contrôle qualité.',
+      };
+    }
+
     const list = this.getQualityControls();
     const target = list.find((q) => q.id === qcId);
-    if (!target) return list;
-    const nowIso = clockService.nowIso();
-    const next = list.map((q) =>
-      q.id === qcId
-        ? {
-            ...q,
-            status: payload.status,
-            criteriaResults: payload.criteriaResults,
-            observations: payload.observations.trim(),
-            controllerName: controller.fullName,
-            controlledAt: nowIso,
-          }
-        : q
+    if (!target) {
+      return {
+        records: this.getQualityControlsForUser(controller).records,
+        error: 'Dossier de contrôle qualité introuvable.',
+      };
+    }
+
+    const authorizedProjectIds = new Set(
+      this.getQualityControlProjectsForUser(controller).map((p) => p.id)
     );
+    if (!this._isQualityControlAccessibleToActor(target, controllerAccount, authorizedProjectIds)) {
+      return {
+        records: this.getQualityControlsForUser(controller).records,
+        error:
+          'Action refusée : vous ne pouvez pas contrôler un dossier appartenant à un projet hors de votre périmètre.',
+      };
+    }
+
+    const nowIso = clockService.nowIso();
+    let updatedRecord: QualityControlRecord | undefined;
+    const next = list.map((q) => {
+      if (q.id !== qcId) return q;
+      updatedRecord = {
+        ...q,
+        status: payload.status,
+        criteriaResults: payload.criteriaResults,
+        observations: payload.observations.trim(),
+        controllerName: controller.fullName,
+        controlledAt: nowIso,
+      };
+      return updatedRecord;
+    });
+
     safeWriteJson(STORAGE_KEYS.QUALITY_CONTROLS, next);
     this.appendAuditLog(
       controller,
@@ -1645,7 +1955,10 @@ export const storageService = {
     );
     this.saveActivitiesForUser(target.employeeId, updatedActivities);
 
-    return next;
+    return {
+      records: this.getQualityControlsForUser(controller).records,
+      updated: updatedRecord,
+    };
   },
 
   // --- Demandes de correction employé ---
